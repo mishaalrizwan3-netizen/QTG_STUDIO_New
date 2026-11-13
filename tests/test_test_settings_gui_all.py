@@ -17,6 +17,34 @@ def descendants(widget):
 
 
 class AllTestSettingsGUI(unittest.TestCase):
+    def test_edits_are_restored_after_app_restart_without_save_button(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \
+                patch.object(main, 'RESULTS_ROOT', Path(folder)), \
+                patch.object(main.messagebox, 'showerror', side_effect=AssertionError('Unexpected GUI error')):
+            index = next(i for i, spec in enumerate(main.TESTS) if spec.reference == '2.a.(1)')
+            ref = main.TESTS[index].reference
+            app = main.App()
+            app.withdraw()
+            try:
+                app.select_test(index)
+                app._test_settings[ref][0]['Throttle[%]'].set('80')
+                app._test_settings[ref][0]['IAS[kts]'].set('75')
+                app._common_duration_vars[ref].set('42')
+                app._automatic_methods[ref].set('Static Control Step')
+            finally:
+                app.destroy()
+            app = main.App()
+            app.withdraw()
+            try:
+                app.select_test(index)
+                self.assertEqual(app._test_settings[ref][0]['Throttle[%]'].get(), '80')
+                self.assertEqual(app._test_settings[ref][0]['IAS[kts]'].get(), '75')
+                self.assertEqual(app._common_duration_vars[ref].get(), '42')
+                self.assertEqual(app._automatic_methods[ref].get(), 'Static Control Step')
+            finally:
+                app.destroy()
+
     def test_compact_display_and_add_remove_update_immediately(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \

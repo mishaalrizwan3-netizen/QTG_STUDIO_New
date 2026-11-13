@@ -394,6 +394,7 @@ class GuiEditGuardTests(unittest.TestCase):
         class Value:
             def __init__(self, value): self.value = value
             def get(self): return self.value
+            def set(self, value): self.value = value
         methods = {name: getattr(App, name) for name in ('_launch_common_test',
                     '_manual_condition_fingerprint', '_manual_conditions_changed',
                     '_operator_universal_enabled', '_initialize_universal_manual')}
@@ -436,7 +437,7 @@ class GuiEditGuardTests(unittest.TestCase):
                     patch.object(engine, 'validate_reference', return_value='manual.csv'):
                 gui._launch_common_test('auto', SimpleNamespace(reference=reference, title='Offline', pdf_graphs=[]))
             launch.assert_called_once()
-            self.assertEqual(launch.call_args.kwargs['control_method'], 'pid' if reference == '1.c.(1)' else 'replay')
+            self.assertEqual(launch.call_args.kwargs['control_method'], 'pid' if reference == '1.c.(1)' else 'engine_step')
             self.assertNotIn('configuration_revision', launch.call_args.kwargs)
             self.assertNotIn(reference, gui._manual_gui_bindings)
 

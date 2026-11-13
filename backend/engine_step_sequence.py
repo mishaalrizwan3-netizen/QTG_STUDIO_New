@@ -2,12 +2,12 @@
 
 The caller must serialize samples, cancellation and dispatch of returned actions.
 Receipt timestamps must be in the same monotonic clock domain as ``now``.
-This module is not wired into the live test worker.
+The Automatic engine worker dispatches these actions only to the P3D throttle.
 """
 from dataclasses import dataclass
 import math
 
-ENGINE_TARGET_RPM = {'1.f.(1)': 2700.0, '1.f.(2)': 972.0}
+ENGINE_TARGET_RPM = {'1.f.(1)': 2700.0, '1.f.(2)': 970.0}
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,7 @@ class Settings:
     baseline_seconds: float = 5.0
     rpm_tolerance: float = 50.0
     stable_seconds: float = 3.0
+    min_total_seconds: float = 15.0
     max_post_command_seconds: float = 30.0
 
     def __post_init__(self):
@@ -35,7 +36,7 @@ class Settings:
         if self.initial_throttle == self.final_throttle or self.target_rpm <= 0:
             raise ValueError('A valid throttle step and RPM target are required')
         if min(self.starting_throttle_tolerance, self.throttle_event_delta, self.engine_response_delta, self.max_receipt_age,
-               self.rpm_tolerance, self.stable_seconds, self.max_post_command_seconds) <= 0:
+               self.rpm_tolerance, self.stable_seconds, self.min_total_seconds, self.max_post_command_seconds) <= 0:
             raise ValueError('Detection thresholds and durations must be positive')
         if self.throttle_event_delta > abs(self.final_throttle - self.initial_throttle):
             raise ValueError('Throttle event threshold exceeds the step')
@@ -43,7 +44,7 @@ class Settings:
 
 class EngineStepSequence:
     """Accept fresh measurements and return at most one throttle action."""
-    TERMINAL = frozenset(('COMPLETE', 'ABORTED', 'FAILED', 'NOT STABILIZED'))
+    TERMINAL = frozenset(('COMPLETE', 'ABORTED', 'FAILED', 'NOT STABILIZED', 'NOT READY'))
 
     def __init__(self, settings):
         self.settings = settings
@@ -107,7 +108,12 @@ class EngineStepSequence:
                 self.fail(now, 'Starting throttle does not match the configured condition')
                 return None
             self.initial_rpm = rpm
-            if now - self.events['recording_start'] >= self.settings.baseline_seconds:
+            if now - self.events['recording_start'] >= self.settings.baseline_seconds - 1e-5:
+                if self.settings.initial_throttle > self.settings.final_throttle:
+                    if abs(rpm - 2700.0) > 75.0:
+                        self.phase, self.reason = 'NOT READY', 'Engine RPM did not reach required starting power (2700 RPM +/-75) during baseline'
+                        self.events['recording_stop'] = now
+                        return None
                 self.events['throttle_command'] = now
                 self.phase = 'THROTTLE COMMAND'
                 return {'type': 'set_throttle', 'percent': self.settings.final_throttle}
@@ -122,13 +128,15 @@ class EngineStepSequence:
             self.phase = 'WAITING FOR RPM'
         if direction * (rpm - self.initial_rpm) >= self.settings.engine_response_delta:
             self._responded = True
-        eligible = 'throttle_onset' in self.events and self._responded
+        eligible = ('throttle_onset' in self.events and self._responded
+                    and abs(throttle - self.settings.final_throttle) <= self.settings.starting_throttle_tolerance)
         if eligible and abs(rpm - self.settings.target_rpm) <= self.settings.rpm_tolerance:
             if self.stable_since is None:
                 self.stable_since = now
                 self.events['stabilization_start'] = now
             self.phase = 'STABILIZING'
-            if now - self.stable_since >= self.settings.stable_seconds:
+            if (now - self.stable_since >= self.settings.stable_seconds - 1e-5 and
+                    now - self.events['recording_start'] >= self.settings.min_total_seconds - 1e-5):
                 self.phase = 'COMPLETE'
                 self.events['stabilization_confirmed'] = now
                 self.events['recording_stop'] = now

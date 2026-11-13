@@ -281,19 +281,29 @@ from backend.initializer import apply_manual_conditions
 
 def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False):
     if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
+    if control_method == 'engine_step' and mode != 'auto':
+        raise ValueError('Engine throttle step requires Automatic Testing')
     policy=engine_test_policy(spec.reference)
     duration_s=validate_duration(policy.DURATION_SECONDS if policy else (75 if duration_s is None else duration_s))
+    if control_method == 'engine_step':
+        duration_s = 35  # Five-second baseline plus the bounded response window.
     initial_condition_overrides = None
     if spec.reference == '1.f.(2)':
         from backend.deceleration_config import resolve_initial_conditions
+        from backend.engine_conditions import deceleration_overrides
         initial_condition_overrides = dict(initial_conditions or {})
+        if mode == 'manual' or control_method == 'engine_step':
+            initial_condition_overrides = deceleration_overrides(initial_condition_overrides)
         initial_conditions = resolve_initial_conditions(initial_condition_overrides)
     else:
         initial_conditions=validate_conditions(initial_conditions)
+    if spec.reference in ('1.f.(1)', '1.f.(2)') and (mode == 'manual' or control_method == 'engine_step'):
+        from backend.engine_conditions import enforce
+        initial_conditions = enforce(spec.reference, initial_conditions)
     brunner_root()
     validate_method(spec.reference, control_method)
     from backend.engine_initialization_adapter import requested
-    universal_auto = mode == 'auto' and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
+    universal_auto = mode == 'auto' and control_method != 'engine_step' and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
     if mode=='auto' and (control_method=='replay' or universal_auto):
         if not reference:
             raise ValueError('Select a Manual reference CSV before Universal Automatic initialization; GUI targets cannot substitute.')
@@ -319,6 +329,10 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
             and mode == 'manual' and control_method == 'replay'):
         context['acceleration_manual_airflow_preparation'] = True
     context_path=output/(token+'_context.json')
+    if control_method == 'engine_step':
+        context['initialization_policy'] = 'Operator aircraft settings; P3D throttle only; no BRUNNER ownership'
+    if control_method == 'static_control':
+        context['initialization_policy'] = 'Operator aircraft settings; exclusive axis motion; no other axis movement'
     if spec.reference == '1.f.(2)':
         context['input_file'] = str(context_path)
         context['initialization_file'] = 'test_suites/engine_deceleration/initialization.json'
@@ -909,11 +923,17 @@ def worker_class(base,context,publish):
                 if requested_test == '1.f.(2)':
                     from backend.deceleration_config import resolve_initial_conditions
                     overrides = dict(command.get('initial_conditions') or {})
+                    if mode == 'manual':
+                        from backend.engine_conditions import deceleration_overrides
+                        overrides = deceleration_overrides(overrides)
                     conditions = resolve_initial_conditions(overrides)
                     context['initial_condition_overrides'] = overrides
                 else:
                     conditions=validate_conditions(command.get('initial_conditions'))
                     context['initial_condition_overrides'] = None
+                if mode == 'manual' and requested_test in ('1.f.(1)', '1.f.(2)'):
+                    from backend.engine_conditions import enforce
+                    conditions = enforce(requested_test, conditions)
                 # Set Conditions already prepares Manual mode. Selecting Manual again
                 # must not teleport the aircraft or repeat hardware preparation.
                 airflow_preparation = (command.get('acceleration_manual_airflow_preparation') is True
@@ -1107,6 +1127,20 @@ def run(context_path):
         except PermissionError:
             # The Tk reader may briefly hold the file on Windows. Publish next tick.
             temporary.unlink(missing_ok=True)
+    from backend.automatic_engine import selected
+    if selected(context):
+        from contextlib import redirect_stdout, redirect_stderr
+        from backend.automatic_engine import run as run_automatic_engine
+        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                return run_automatic_engine(context, publish)
+    from backend.automatic_control import selected as static_control_selected
+    if static_control_selected(context):
+        from contextlib import redirect_stdout, redirect_stderr
+        from backend.automatic_control import run as run_automatic_control
+        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                return run_automatic_control(context, publish)
     stream=open(status_path.with_suffix('.log'),'a',encoding='utf-8',buffering=1)
     sys.stdout=sys.stderr=stream
     base=load_base()

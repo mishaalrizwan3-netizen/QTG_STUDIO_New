@@ -41,14 +41,14 @@ class DecelerationConfigTests(unittest.TestCase):
             with patch.object(engine, "brunner_root"), patch.object(engine.subprocess, "Popen"):
                 _, context = engine.launch("manual", spec, root / "sessions", initial_conditions={"throttle": 92})
             saved = json.loads(Path(context["input_file"]).read_text())
-            self.assertEqual(saved["initial_conditions"]["throttle"], 92.0)
+            self.assertEqual(saved["initial_conditions"]["throttle"], 100.0)
             self.assertEqual(saved["initial_conditions"]["lat"], 32.23366667)
             csv_file = root / "measured.csv"
             csv_file.write_text("Time (s),Engine RPM\n0,2700\n")
             manifest = config.write_output_manifest(context, [str(csv_file)])
             contents = json.loads(manifest.read_text())
             self.assertEqual(contents["artifacts"], [str(csv_file)])
-            self.assertEqual(contents["initial_conditions"]["throttle"], 92.0)
+            self.assertEqual(contents["initial_conditions"]["throttle"], 100.0)
             self.assertNotIn("samples", contents)
 
 

@@ -11,6 +11,10 @@ datas = [(str(root/'test_suites'/'normal_climb'/'pid_source'/'SMK_IAS_PID_BRUNNE
          (str(root/'reports'/'plot_graphs.py'), 'engine_report'),
          (str(root/'plot_graphs.py'), '.')]
 datas += [(str(brunner/'src'/name), 'brunner_base/src') for name in ['replay_support.py','brunner_interface.py','p3d_simconnect_v15.py','plot_graphs.py']]
+datas += [(str(brunner/'src'/name), 'interfaces/brunner_base/src') for name in ['replay_support.py','brunner_interface.py','p3d_simconnect_v15.py','plot_graphs.py']]
+datas += [(str(root/'bridge/bin'/name), 'bridge/bin') for name in ['qtg_p3d_bridge.dll', 'qtg_simconnect.dll']]
+datas += [(str(brunner/'native/bin'/'p3d_bridge_engine_init_v1517.dll'), 'brunner_base/native/bin')]
+datas += [(str(root/'p3d_bridge.dll'), '.')]
 datas += [(str(root/'test_suites'/relative), 'test_suites/'+str(Path(relative).parent)) for relative in ['_shared/engine_initialization.py','engine_acceleration/procedure.py','engine_deceleration/procedure.py']]
 datas += [(str(root/'test_suites'/name/'definition.json'), 'test_suites/'+name) for name in ['normal_climb','engine_acceleration','engine_deceleration']]
 datas += [(str(root/'test_suites'/'engine_deceleration'/name), 'test_suites/engine_deceleration') for name in ['initialization.json','input.json','output.json']]
@@ -25,7 +29,14 @@ binaries += collect_dynamic_libs('pandas')
 a = Analysis([str(root/'main.py')], pathex=[str(root)], binaries=binaries, datas=datas,
     hiddenimports=['qtg_pid_monitor','qtg_climb_pid','winsound', 'qtg_common_engine', 'PySide6.QtGui', 'PySide6.QtCore', 'SMK_Engine_From_Climb', 'portable_self_test', 'engine_report_v2',
                    'plot_graphs', 'SMK_Engine_TiTt_V2_1_3_Addon', 'qtg_position_setter',
-                   'numpy', 'pandas', 'PIL.ImageTk', 'tools.deployment_check'] + collect_submodules('backend'),
+                   'numpy', 'pandas', 'PIL.ImageTk', 'tools.deployment_check',
+                   'interfaces.engine_measurements', 'reports.automatic_engine_report',
+                   'backend.automatic_engine', 'backend.engine_step_sequence', 'backend.engine_conditions']
+                   + collect_submodules('backend')
+                   + collect_submodules('interfaces')
+                   + collect_submodules('reports')
+                   + collect_submodules('frontend')
+                   + collect_submodules('qtg_backend'),
     hooksconfig={'matplotlib': {'backends': ['Agg']}},
     hookspath=[], runtime_hooks=[str(root/'tools/simpc_runtime_hook.py')], excludes=['PyQt5','PyQt6','PySide2','IPython','pytest','unittest','numpy.tests','pandas.tests','matplotlib.tests'],
     noarchive=False, optimize=1)

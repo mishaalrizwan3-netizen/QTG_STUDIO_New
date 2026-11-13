@@ -428,7 +428,7 @@ def _plot_auto(ax, t_m, y_m, t_a, y_a, ylabel,
 
 
 
-def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result=None, virtual_forces=False):
+def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result=None, virtual_forces=False, missing_label="-"):
 
     date_text, time_text = _parse_stamp(source_path)
 
@@ -616,6 +616,8 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
     def values(key):
 
         simv = _fmt(_safe(sim_df,key))
+        if simv == "-":
+            simv = missing_label
 
         force_axes = {"Joystick Pitch Force (N)": "Pitch", "Joystick Roll Force (N)": "Roll", "Rudder Pedal Force (N)": "Yaw"}
 

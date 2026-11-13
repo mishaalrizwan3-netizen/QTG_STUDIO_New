@@ -126,6 +126,9 @@ ENGINE_DECEL_DEFAULT_KEYS = {
     "throttle_pct", "engine_rpm", "prop_rpm",
     "manifold_inhg", "fuel_flow_pph", "titt"
 }
+STATIC_PITCH_DEFAULT_KEYS = {"ias_kt", "pitch_position", "pitch_force"}
+STATIC_ROLL_DEFAULT_KEYS = {"ias_kt", "roll_position", "roll_force"}
+STATIC_YAW_DEFAULT_KEYS = {"ias_kt", "rudder_position", "rudder_force"}
 
 def default_channels_for_spec(spec_ref):
     if spec_ref == "1.c.(1)":
@@ -134,6 +137,12 @@ def default_channels_for_spec(spec_ref):
         return ENGINE_ACCEL_DEFAULT_KEYS
     elif spec_ref == "1.f.(2)":
         return ENGINE_DECEL_DEFAULT_KEYS
+    elif spec_ref == "2.a.(1)":
+        return set(STATIC_PITCH_DEFAULT_KEYS)
+    elif spec_ref == "2.a.(2)":
+        return set(STATIC_ROLL_DEFAULT_KEYS)
+    elif spec_ref == "2.a.(3)":
+        return set(STATIC_YAW_DEFAULT_KEYS)
     return {col for _, col in PDF_CHANNELS}
 
 def read_graph_csv(path):
@@ -996,9 +1005,15 @@ class App(tk.Tk):
         self.test_class_var = tk.StringVar(value="SEP")
         self.rec_status_var = tk.StringVar(value="● STANDBY — Click 'Start Manual Recording' to begin test")
         self.auto_status_var = tk.StringVar(value="Ready for automated validation sequence")
-        self._automatic_methods = {spec.reference: tk.StringVar(value="Recorded Replay") for spec in TESTS}
+        from backend.app_preferences import load as load_preferences
+        try:
+            self._app_preferences = load_preferences(RESULTS_ROOT / 'app_preferences.json')
+        except (OSError, ValueError) as exc:
+            self._app_preferences = None
+            messagebox.showerror('Saved application preferences', str(exc), parent=self)
+        self._automatic_methods = {spec.reference: self._preference_var(spec.reference, 'automatic_method', 'Recorded Replay') for spec in TESTS}
         self._pid_targets = {spec.reference: tk.StringVar(value="80") for spec in TESTS}
-        self._pid_validation = {spec.reference: tk.StringVar() for spec in TESTS}
+        self._pid_validation = {spec.reference: self._preference_var(spec.reference, 'pid_validation', '') for spec in TESTS}
 
         self._set_style()
         self._build_header()
@@ -1032,6 +1047,22 @@ class App(tk.Tk):
         if os.environ.get('QTG_OFFLINE_GUI_CHECK') != '1':
             self.after(300, self._poll_p3d)
             self.after(2000, self._auto_sync_timer)
+
+    def _preference_var(self, reference, name, default):
+        preferences = getattr(self, '_app_preferences', None)
+        value = preferences.get(reference, {}).get(name, default) if preferences is not None else default
+        variable = tk.StringVar(value=value)
+        def persist(*_):
+            if self._app_preferences is None:
+                return
+            from backend.app_preferences import save
+            self._app_preferences.setdefault(reference, {})[name] = variable.get()
+            try:
+                save(RESULTS_ROOT / 'app_preferences.json', self._app_preferences)
+            except OSError as exc:
+                messagebox.showerror('Application preference not saved', str(exc), parent=self)
+        variable.trace_add('write', persist)
+        return variable
 
     def _auto_sync_timer(self):
         def _worker():
@@ -1928,24 +1959,30 @@ class App(tk.Tk):
         self.common_progress=ttk.Progressbar(box,maximum=75,mode="determinate")
         self.common_progress.pack(fill="x",pady=(0,12))
         if not hasattr(self,"_common_reference_vars"): self._common_reference_vars={}
-        self._common_reference_var=self._common_reference_vars.setdefault(spec.reference,tk.StringVar())
+        if spec.reference not in self._common_reference_vars:
+            self._common_reference_vars[spec.reference] = self._preference_var(spec.reference, 'manual_reference', '')
+        self._common_reference_var=self._common_reference_vars[spec.reference]
         if not getattr(self._common_reference_var, '_universal_change_guard', False):
             self._common_reference_var.trace_add('write', lambda *_, ref=spec.reference: self._manual_conditions_changed(ref))
             self._common_reference_var._universal_change_guard = True
         reference=tk.LabelFrame(box,text="Manual reference for Automatic initialization / Recorded Replay",bg="#FFFFFF",fg=COL["blue"],padx=10,pady=10)
         reference.pack(fill="x",pady=(0,12))
+        self.common_reference_frame = reference
         self.common_reference_combo=ttk.Combobox(reference,textvariable=self._common_reference_var,state="readonly")
         self.common_reference_combo.pack(side="left",fill="x",expand=True)
         ttk.Button(reference,text="Browse CSV",command=self._browse_common_reference).pack(side="left",padx=(8,0))
         ttk.Button(reference,text="Refresh",command=lambda:self._refresh_common_references(select_latest=spec.reference=='1.f.(2)')).pack(side="left",padx=(8,0))
         if spec.reference in ('1.f.(1)', '1.f.(2)'):
             ttk.Button(reference,text="Inspect Reference",command=self._inspect_common_reference).pack(side="left",padx=(8,0))
-        self._refresh_common_references(select_latest=spec.reference=='1.f.(2)')
+        self._refresh_common_references()
         bar=tk.Frame(box,bg="#FFFFFF")
         bar.pack(fill="x")
+        self.common_bar = bar
         self._label(bar,"Duration (s):",9,COL["text"],anchor="w").pack(side="left")
         if not hasattr(self,"_common_duration_vars"): self._common_duration_vars={}
-        self._common_duration_var=self._common_duration_vars.setdefault(spec.reference,tk.StringVar(value="21" if spec.reference in ("1.f.(1)","1.f.(2)") else "75"))
+        if spec.reference not in self._common_duration_vars:
+            self._common_duration_vars[spec.reference] = self._preference_var(spec.reference, 'duration', '21' if spec.reference in ('1.f.(1)', '1.f.(2)') else '75')
+        self._common_duration_var=self._common_duration_vars[spec.reference]
         self.common_duration_spinbox=ttk.Spinbox(bar,from_=1,to=3600,width=6,textvariable=self._common_duration_var)
         self.common_duration_spinbox.pack(side="left",padx=(6,14))
         self._sync_common_duration(spec)
@@ -2020,7 +2057,10 @@ class App(tk.Tk):
         if not hasattr(self,'_pid_duration_vars'):self._pid_duration_vars={}
         is_pid=spec.reference=='1.c.(1)'
         default_dur = '21' if spec.reference in ('1.f.(1)', '1.f.(2)') else '75'
-        self._common_duration_var=self._pid_duration_vars.setdefault(spec.reference,tk.StringVar(value='75')) if is_pid else self._common_duration_vars.setdefault(spec.reference, tk.StringVar(value=default_dur))
+        variables = self._pid_duration_vars if is_pid else self._common_duration_vars
+        if spec.reference not in variables:
+            variables[spec.reference] = self._preference_var(spec.reference, 'pid_duration' if is_pid else 'duration', default_dur)
+        self._common_duration_var=variables[spec.reference]
         self.common_duration_spinbox.configure(textvariable=self._common_duration_var)
 
     def _refresh_common_references(self,select_latest=False):
@@ -2035,6 +2075,9 @@ class App(tk.Tk):
                 if "manual" in name and not any(word in name for word in ("diagnostic","commissioning","legacy_plot","test_qtg","titt_summary","titt_results","summary")):
                     candidates[str(path.resolve())]=path.stat().st_mtime
         self._common_reference_catalog=sorted(candidates,key=candidates.get,reverse=True)
+        saved_reference = self._common_reference_var.get()
+        if saved_reference and Path(saved_reference).is_file() and saved_reference not in self._common_reference_catalog:
+            self._common_reference_catalog.insert(0, saved_reference)
         if hasattr(self,"common_reference_combo") and self.common_reference_combo.winfo_exists():
             self.common_reference_combo.configure(values=self._common_reference_catalog)
             if select_latest or self._common_reference_var.get() not in self._common_reference_catalog:
@@ -2092,15 +2135,18 @@ class App(tk.Tk):
             if self._universal_initialize_button is not None:
                 self._universal_initialize_button.configure(state='disabled' if phase=='INITIALIZING' else 'normal')
         stage=state.get("stage","Connecting")
-        text=f"Test {state.get('test_reference','')} - {state.get('mode','').title()} ({'PID Automatic' if state.get('control_method')=='pid' else 'Recorded Replay'}): {stage}"
+        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step'}.get(state.get('control_method'), 'Recorded Replay')
+        text=f"Test {state.get('test_reference','')} - {state.get('mode','').title()} ({method_name}): {stage}"
         if state.get("details"): text+="\n"+state["details"]
         if state.get("evaluation_result"): text+="\nValidation: "+state["evaluation_result"]
         text=text.replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim")
-        self.common_status.configure(text=text,fg=COL["red"] if stage in ("Automatic blocked","Connection error") else COL["blue"])
+        self.common_status.configure(text=text,fg=COL["red"] if stage in ("Automatic blocked","Connection error", "FAILED") else COL["blue"])
         mapping={"throttle":"throttle_text","engine":"engine_text","flight":"flight_text","attitude":"attitude_text",
                  "controls":"controls_text","recording":"recording_text","progress":"progress_text"}
-        self._common_view_vars["connection"].set(f"Sim Flight Model {'Connected' if state.get('connected') else 'Disconnected'} | CLS2sim Connection: {'Connected' if state.get('brunner_connected') else 'Disconnected'}")
-        for key,field in mapping.items(): self._common_view_vars[key].set((state.get(field) or "--").replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim"))
+        connection_text = f"Sim Flight Model {'Connected' if state.get('connected') else 'Disconnected'}"
+        connection_text += ' | P3D throttle control' if state.get('control_method') == 'engine_step' else f" | CLS2sim Connection: {'Connected' if state.get('brunner_connected') else 'Disconnected'}"
+        self._common_view_vars["connection"].set(connection_text)
+        for key,field in mapping.items(): self._common_view_vars[key].set((state.get(field) or "N/A").replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim"))
         telemetry=state.get("telemetry") or {}
         def measured(key):
             try:
@@ -2112,26 +2158,42 @@ class App(tk.Tk):
         climb=measured("vertical_speed")
         weight=measured("total_weight")
         cg=measured("cg_percent")
-        climb_text=f"{climb:+.0f} ft/min" if climb is not None else "--"
-        weight_text=f"{weight:.1f} kg" if weight is not None and weight>0 else "--"
-        cg_text=f"{cg:.1f}%" if cg is not None else "--"
+        climb_text=f"{climb:+.0f} ft/min" if climb is not None else "N/A"
+        weight_text=f"{weight:.1f} kg" if weight is not None and weight>0 else "N/A"
+        cg_text=f"{cg:.1f}%" if cg is not None else "N/A"
         self._common_view_vars["performance"].set(f"Rate of climb: {climb_text} | Weight: {weight_text} | CG: {cg_text}")
 
         recording_live=bool(state.get("recording") and (state.get("samples") or 0)>0)
-        self._common_view_vars["recording_indicator"].set("RECORDING: ACTIVE" if recording_live else "RECORDING: OFF")
+        if recording_live:
+            el = float(state.get("elapsed", 0.0) or 0.0)
+            mins = int(el // 60)
+            secs = int(el % 60)
+            self._common_view_vars["recording_indicator"].set(f"RECORDING: ACTIVE ({mins:02d}:{secs:02d})")
+        else:
+            self._common_view_vars["recording_indicator"].set("RECORDING: OFF")
         self._common_view_labels["recording_indicator"].configure(fg=COL["green"] if recording_live else COL["dim"])
 
-        if stage=="Generating reports":
-            if str(self.common_progress.cget("mode"))!="indeterminate":
+        if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
+            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)')
+                               and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control")))
+            if is_special_auto:
+                if self.common_reference_frame.winfo_manager():
+                    self.common_reference_frame.pack_forget()
+            else:
+                if not self.common_reference_frame.winfo_manager() and hasattr(self, 'common_bar') and self.common_bar.winfo_exists():
+                    self.common_reference_frame.pack(fill="x", pady=(0, 12), before=self.common_bar)
+
+        if stage == "Generating reports":
+            if str(self.common_progress.cget("mode")) != "indeterminate":
                 self.common_progress.configure(mode="indeterminate")
                 self.common_progress.start()
         else:
             self.common_progress.stop()
-            self.common_progress.configure(mode="determinate",maximum=max(1,state.get("duration_s",75)),value=state.get("elapsed",0))
+            self.common_progress.configure(mode="determinate", maximum=max(1, state.get("duration_s", 75)), value=state.get("elapsed", 0))
         self.common_record_button.configure(state="normal" if state.get("can_record") and os.environ.get('QTG_UNIVERSAL_INITIALIZATION_ONLY') != '1' else "disabled")
-        self.common_output_var.set("Data: "+state.get("data_directory",str(RESULTS_ROOT)))
+        self.common_output_var.set("Data: " + state.get("data_directory", str(RESULTS_ROOT)))
 
-    def _launch_common_test(self,mode,spec,force_initialize=False,control_method=None):
+    def _launch_common_test(self, mode, spec, force_initialize=False, control_method=None):
         import os
         try:
             if spec.reference == '1.c.(2)':
@@ -2151,43 +2213,98 @@ class App(tk.Tk):
                     return
             from qtg_common_engine import launch,validate_duration,validate_reference
             duration=validate_duration(self._common_duration_var.get())
-            if control_method not in (None,"pid","replay"):raise ValueError("Unknown automatic control method")
+            if control_method not in (None,"pid","replay","engine_step","static_control"):raise ValueError("Unknown automatic control method")
+            engine_automatic = mode == 'auto' and spec.reference in ('1.f.(1)', '1.f.(2)')
+            static_control_automatic = mode == 'auto' and spec.reference in ('2.a.(1)', '2.a.(2)', '2.a.(3)')
             if mode == "auto" and spec.reference == "1.c.(1)" and control_method is None:
 
                 selected_method = self._automatic_methods[spec.reference].get()
 
                 method = "pid" if selected_method == "PID Automatic" else "replay"
 
+            elif engine_automatic:
+                method = 'engine_step'
+            elif static_control_automatic:
+                method = 'static_control'
             else:
 
                 method = control_method or "replay"
 
-            if mode=="manual":duration=validate_duration(self._common_duration_vars[spec.reference].get())
-            fields,_=self._test_settings[spec.reference]
-            reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)')
+            if engine_automatic or static_control_automatic:
+                if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
+                    self.common_reference_frame.pack_forget()
+            elif mode == "manual" and spec.reference in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)'):
+                if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
+                    if not self.common_reference_frame.winfo_manager() and hasattr(self, 'common_bar') and self.common_bar.winfo_exists():
+                        self.common_reference_frame.pack(fill="x", pady=(0, 12), before=self.common_bar)
+
+            if mode == "manual":
+                duration = validate_duration(self._common_duration_vars[spec.reference].get())
+            fields, _ = self._test_settings[spec.reference]
+            # Show the required test conditions before validating and sending them.
+            if spec.reference in ('1.f.(1)', '1.f.(2)'):
+                required = {'Throttle[%]': '5' if spec.reference == '1.f.(1)' else '100'}
+                if spec.reference == '1.f.(2)':
+                    required.update({'Flt cond': 'Ground', 'IAS[kts]': '0'})
+                for key, value in required.items():
+                    if fields[key].get().strip() != value:
+                        fields[key].set(value)
+            reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)')
                               and any(not var.get().strip() for var in fields.values()))
             if reference_only:
                 from backend.engine_initialization_adapter import requested as universal_requested
                 reference_only = not universal_requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             if reference_only:
-                if not self._apply_test_settings(spec, allow_incomplete=True): return
-            elif not self._apply_test_settings(spec): return
-            fields,_=self._test_settings[spec.reference]
-            initial=None if reference_only else dict(alt_ft=float(fields["Alt[ft]"].get()),ias_kt=float(fields["IAS[kts]"].get()),lat=float(fields["Latitude[deg]"].get()),lon=float(fields["Longitude[deg]"].get()),heading_deg=float(fields["Heading[deg]"].get()),pitch_deg=float(fields["Pitch[deg]"].get()),bank_deg=float(fields["Bank[deg]"].get()),flaps=float(fields["Flaps"].get()),throttle=float(fields["Throttle[%]"].get()),temperature_c=float(fields["Temperature[C]"].get()),on_ground="ground" in fields["Flt cond"].get().lower())
+                if not self._apply_test_settings(spec, allow_incomplete=True):
+                    return
+            else:
+                if not self._apply_test_settings(spec):
+                    return
+            fields, _ = self._test_settings[spec.reference]
+            if reference_only:
+                initial = None
+            else:
+                initial = dict(
+                    alt_ft=float(fields["Alt[ft]"].get()),
+                    ias_kt=float(fields["IAS[kts]"].get()),
+                    lat=float(fields["Latitude[deg]"].get()),
+                    lon=float(fields["Longitude[deg]"].get()),
+                    heading_deg=float(fields["Heading[deg]"].get()),
+                    pitch_deg=float(fields["Pitch[deg]"].get()),
+                    bank_deg=float(fields["Bank[deg]"].get()),
+                    flaps=float(fields["Flaps"].get()),
+                    throttle=float(fields["Throttle[%]"].get()),
+                    temperature_c=float(fields["Temperature[C]"].get()),
+                    on_ground="ground" in fields["Flt cond"].get().lower(),
+                )
             if spec.reference == "1.f.(2)":
                 from backend.deceleration_config import display_overrides
                 current_display = {key: var.get() for key, var in fields.items()}
                 initial = display_overrides(current_display, self._test_defaults[spec.reference])
-            selected=[key for _,key in spec.pdf_graphs]
-            conditions=None;validation=None
-            if method=="pid":
-                fields,_=self._test_settings[spec.reference]
+            selected = [key for _, key in spec.pdf_graphs]
+            conditions = None
+            validation = None
+            if method == "pid":
+                fields, _ = self._test_settings[spec.reference]
                 from qtg_climb_pid import options
-                conditions=options(dict(alt_ft=float(fields["Alt[ft]"].get()),ias_kt=float(fields["IAS[kts]"].get()),lat=float(fields["Latitude[deg]"].get()),lon=float(fields["Longitude[deg]"].get()),heading_deg=float(fields["Heading[deg]"].get()),pitch_deg=float(fields["Pitch[deg]"].get()),bank_deg=float(fields["Bank[deg]"].get()),flaps=float(fields["Flaps"].get()),throttle=float(fields["Throttle[%]"].get()),temperature_c=float(fields["Temperature[C]"].get()),target_ias=80.))
-                validation=self._pid_validation[spec.reference].get().strip() or None
-                if validation and not Path(validation).is_file(): raise ValueError("Validation dataset not found.")
+                conditions = options(dict(
+                    alt_ft=float(fields["Alt[ft]"].get()),
+                    ias_kt=float(fields["IAS[kts]"].get()),
+                    lat=float(fields["Latitude[deg]"].get()),
+                    lon=float(fields["Longitude[deg]"].get()),
+                    heading_deg=float(fields["Heading[deg]"].get()),
+                    pitch_deg=float(fields["Pitch[deg]"].get()),
+                    bank_deg=float(fields["Bank[deg]"].get()),
+                    flaps=float(fields["Flaps"].get()),
+                    throttle=float(fields["Throttle[%]"].get()),
+                    temperature_c=float(fields["Temperature[C]"].get()),
+                    target_ias=80.0,
+                ))
+                validation = self._pid_validation[spec.reference].get().strip() or None
+                if validation and not Path(validation).is_file():
+                    raise ValueError("Validation dataset not found.")
             from backend.engine_initialization_adapter import requested
-            universal = requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
+            universal = not (engine_automatic or static_control_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
             if mode=="auto" and (method=="replay" or universal):
                 if not reference:
@@ -2209,12 +2326,23 @@ class App(tk.Tk):
                 if state.get("controlling") or state.get("recording") or state.get("stage") in ("Initializing aircraft","Generating reports"):
                     self.common_status.configure(text="Stop the active test and wait for preparation to finish before initializing again.",fg=COL["amber"])
                     return
+                if (method in ('engine_step', 'static_control') or self._common_context.get('control_method') in ('engine_step', 'static_control')):
+                    self._common_command('shutdown')
+                    self.common_record_button.configure(state='disabled')
+                    self.common_status.configure(text='Closing the previous test worker before initialization...', fg=COL['blue'])
+                    self._wait_common_worker_exit(current, mode, spec, force_initialize, control_method)
+                    return
                 self._common_command("initialize",force_initialize=force_initialize,mode=mode,reference_csv=reference,duration_s=duration,test_reference=spec.reference,title=spec.title,control_method=method,pid_conditions=conditions,validation_csv=validation,initial_conditions=initial,selected_graphs=selected,acceleration_manual_airflow_preparation=airflow_preparation,**binding_options)
                 self._common_context.update(test_reference=spec.reference,title=spec.title)
             else:
-                self._common_last_state={}
-                self._common_process,self._common_context=launch(mode,spec,RESULTS_ROOT/"sessions",reference,duration,control_method=method,pid_conditions=conditions,validation_csv=validation,initial_conditions=initial,selected_graphs=selected,acceleration_manual_airflow_preparation=airflow_preparation,**binding_options)
-                self.after(200,self._poll_common_test)
+                self._common_last_state = {}
+                self._common_process, self._common_context = launch(
+                    mode, spec, RESULTS_ROOT / "sessions", reference, duration,
+                    control_method=method, pid_conditions=conditions, validation_csv=validation,
+                    initial_conditions=initial, selected_graphs=selected,
+                    acceleration_manual_airflow_preparation=airflow_preparation, **binding_options
+                )
+                self.after(200, self._poll_common_test)
             if not hasattr(self, '_manual_gui_bindings'):
                 self._manual_gui_bindings = {}
             self._common_context['configuration_revision'] = binding_options.get('configuration_revision')
@@ -2241,13 +2369,28 @@ class App(tk.Tk):
                     hover_fg="#FFFFFF" if is_aut else COL["blue"]
                 )
             self.common_record_button.configure(state="disabled")
-            status_desc = "Auto (PID)" if (mode == "auto" and method == "pid") else ("Auto (Replay)" if (mode == "auto" and method == "replay") else mode.title())
-            self.common_status.configure(text=f"{status_desc}: initializing Sim Flight Model and CLS2sim connection...",fg=COL["blue"])
+            if static_control_automatic:
+                status_desc = 'Auto (Static Control)'
+            elif engine_automatic:
+                status_desc = 'Auto (P3D Throttle Step)'
+            else:
+                status_desc = ("Auto (PID)" if (mode == "auto" and method == "pid") else ("Auto (Replay)" if (mode == "auto" and method == "replay") else mode.title()))
+            connection_desc = 'Sim Flight Model and CLS2sim' if static_control_automatic else ('Sim Flight Model' if engine_automatic else 'Sim Flight Model and CLS2sim connection')
+            if engine_automatic or static_control_automatic:
+                self.common_status.configure(text=f"{status_desc}: connecting to {connection_desc}...", fg=COL["blue"])
+            else:
+                self.common_status.configure(text=f"{status_desc}: initializing {connection_desc}...", fg=COL["blue"])
         except Exception as exc:
-            self.common_status.configure(text=str(exc),fg=COL["red"])
+            self.common_status.configure(text=str(exc), fg=COL["red"])
             if getattr(self, '_universal_panel', None) is not None and getattr(self, '_universal_initialize_requested', False):
-                self._universal_summary.set('Status: FAILED | Recording lock: UNVERIFIED | '+str(exc))
+                self._universal_summary.set('Status: FAILED | Recording lock: UNVERIFIED | ' + str(exc))
                 self._universal_initialize_button.configure(state='normal')
+
+    def _wait_common_worker_exit(self, process, mode, spec, force_initialize, control_method):
+        if process.poll() is None:
+            self.after(100, lambda: self._wait_common_worker_exit(process, mode, spec, force_initialize, control_method))
+            return
+        self._launch_common_test(mode, spec, force_initialize=force_initialize, control_method=control_method)
 
     def _operator_universal_enabled(self, spec):
         from backend.engine_initialization_adapter import requested
@@ -2351,7 +2494,9 @@ class App(tk.Tk):
             self._render_common_state(state)
             if process.poll() is not None and context.get("test_reference")==self._common_display_spec.reference and hasattr(self,"common_status") and self.common_status.winfo_exists():
                 self.common_record_button.configure(state="disabled")
-                if state.get("stage")!="Closed":
+                if state.get("stage") == 'FAILED' and state.get('details'):
+                    self.common_status.configure(text='Automatic test failed: ' + state['details'], fg=COL['red'])
+                elif state.get("stage")!="Closed":
                     self.common_status.configure(text=f"Background engine exited (code {process.returncode}). Check session logs.",fg=COL["red"])
         except (OSError,ValueError,tk.TclError): pass
         if process.poll() is None: self.after(200,self._poll_common_test)
@@ -3177,7 +3322,10 @@ class App(tk.Tk):
                 {key: tk.StringVar(value=value) for key, value in defaults.items()},
                 g_list)
             for variable in self._test_settings[spec.reference][0].values():
-                variable.trace_add('write', lambda *_, ref=spec.reference: self._manual_conditions_changed(ref))
+                def changed(*_, ref=spec.reference):
+                    self._manual_conditions_changed(ref)
+                    App._autosave_test_initial_conditions(self, ref)
+                variable.trace_add('write', changed)
             spec.pdf_graphs = [(label, column) for label, column, v in g_list if v.get()]
             def _make_sync(s=spec, gl=g_list):
                 def _do_sync(*_):
@@ -3230,7 +3378,10 @@ class App(tk.Tk):
         if not hasattr(self,"_automatic_methods"): self._automatic_methods={}
         self._automatic_methods.setdefault(spec.reference,tk.StringVar(value="PID Automatic" if spec.reference=="1.c.(1)" else "Recorded Replay"))
         self._label(box,"Automatic Control Method",10,COL["text"],"bold").pack(anchor="w",pady=(4,2))
-        methods=["Recorded Replay","PID Automatic"] if spec.reference=="1.c.(1)" else ["Recorded Replay"]
+        methods=["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)') else (["Recorded Replay","PID Automatic"] if spec.reference=="1.c.(1)" else ["Recorded Replay"])
+        if spec.reference in ('1.f.(1)', '1.f.(2)'):
+            self._automatic_methods[spec.reference].set('P3D Throttle Step')
+            self._label(box, 'Automatic initializes from Test Settings. Acceleration uses 5% idle to 100% throttle; Deceleration uses 100% to 5% idle. Click Start Recording when READY TO RECORD. Records 5 seconds, steps the P3D throttle, then stops after 3 seconds at target RPM. No Manual reference is required. Deceleration requires parking brake ON before full throttle.', 8, COL['dim'], wraplength=235, justify='left').pack(fill='x', pady=4)
         method_combo=ttk.Combobox(box,textvariable=self._automatic_methods[spec.reference],values=methods,
                      state="readonly" if unlocked else "disabled")
         method_combo.pack(fill="x")
@@ -3358,6 +3509,16 @@ class App(tk.Tk):
                     8, COL["dim"], wraplength=235, justify="left").pack(fill="x", pady=4)
         self._label(box, "Clear all graphs for a summary-only PDF. Settings apply when starting a test.",
                     8, COL["dim"], wraplength=235, justify="left").pack(fill="x", pady=8)
+
+    def _autosave_test_initial_conditions(self, reference):
+        from backend.initial_condition_settings import save
+        values = {key: var.get().strip() for key, var in self._test_settings[reference][0].items()}
+        visible = getattr(self, '_visible_condition_fields', {}).get(reference)
+        try:
+            save(RESULTS_ROOT / 'initial_condition_settings', reference, values,
+                 visible_fields=visible, validate_values=False)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('Initial conditions not saved', str(exc), parent=self)
 
     def _save_test_initial_conditions(self, spec, *, quiet=False):
         from backend.initial_condition_settings import save
@@ -3681,9 +3842,9 @@ def main():
 
 
 def cli():
-    if '--offline-gui-check' in sys.argv:
+    if '--offline-gui-check' in sys.argv or '--deployment-check' in sys.argv:
         from tools.deployment_check import run
-        return run(sys.modules[__name__])
+        sys.exit(run(sys.modules[__name__]))
     if '--diagnostic-connection' in sys.argv:
         from backend.diagnostic_connection import run_standalone
         return run_standalone(sys.argv[sys.argv.index('--diagnostic-connection')+1])
