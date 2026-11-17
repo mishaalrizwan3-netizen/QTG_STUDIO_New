@@ -290,13 +290,19 @@ class CommonEngineTests(unittest.TestCase):
             with patch.object(engine.subprocess,'Popen') as spawn:
                 for spec in main.TESTS:
                     for mode in ['manual','auto']:
-                        _,context=engine.launch(mode,spec,Path(folder)/'sessions',reference if mode=='auto' else None)
+                        if spec.reference == '2.a.(8)':
+                            if mode == 'auto':
+                                continue
+                            init_cond = dict(alt_ft=755, ias_kt=0, lat=32, lon=74, flaps=0, throttle=0, temperature_c=15, on_ground=True)
+                        else:
+                            init_cond = None
+                        _,context=engine.launch(mode,spec,Path(folder)/'sessions',reference if mode=='auto' else None,initial_conditions=init_cond)
                         self.assertEqual(context['test_reference'],spec.reference)
                         self.assertEqual(context['mode'],mode)
                         args=spawn.call_args.args[0]
                         self.assertIn('--brunner-test',args)
                         self.assertNotIn('--engine-suite',args)
-                self.assertEqual(spawn.call_count,60)
+                self.assertEqual(spawn.call_count, 63)
 
     def test_frozen_launch_uses_bundled_exe(self):
         with tempfile.TemporaryDirectory() as folder:

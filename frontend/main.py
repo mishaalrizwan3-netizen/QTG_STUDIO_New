@@ -138,6 +138,11 @@ ENGINE_ACCEL_DEFAULT_KEYS = {
     "throttle_pct", "engine_rpm", "prop_rpm",
     "manifold_inhg", "fuel_flow_pph", "titt"
 }
+POWER_DYNAMICS_DEFAULT_KEYS = {
+    'ias_kt', 'altitude_msl_ft', 'height_agl_ft', 'vertical_speed_fpm',
+    'pitch_deg', 'bank_deg', 'heading_deg', 'throttle_pct',
+    'engine_rpm', 'prop_rpm', 'manifold_inhg'
+}
 ENGINE_DECEL_DEFAULT_KEYS = {
     "ground_speed_kt",
     "throttle_pct", "engine_rpm", "prop_rpm",
@@ -154,6 +159,8 @@ def default_channels_for_spec(spec_ref):
         return ENGINE_ACCEL_DEFAULT_KEYS
     elif spec_ref == "1.f.(2)":
         return ENGINE_DECEL_DEFAULT_KEYS
+    elif spec_ref == "2.b.(11)":
+        return set(POWER_DYNAMICS_DEFAULT_KEYS)
     elif spec_ref == "2.a.(1)":
         return set(STATIC_PITCH_DEFAULT_KEYS)
     elif spec_ref == "2.a.(2)":
@@ -2167,7 +2174,7 @@ class App(tk.Tk):
             if self._universal_initialize_button is not None:
                 self._universal_initialize_button.configure(state='disabled' if phase=='INITIALIZING' else 'normal')
         stage=state.get("stage","Connecting")
-        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step', 'stall': 'Stall Warning', 'pitch_trim': 'Pitch Trim Step'}.get(state.get('control_method'), 'Recorded Replay')
+        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step', 'stall': 'Stall Warning', 'pitch_trim': 'Pitch Trim Step', 'power_dynamics': 'Power Change Dynamics'}.get(state.get('control_method'), 'Recorded Replay')
         text=f"Test {state.get('test_reference','')} - {state.get('mode','').title()} ({method_name}): {stage}"
         if state.get("details"): text+="\n"+state["details"]
         if state.get("evaluation_result"): text+="\nValidation: "+state["evaluation_result"]
@@ -2176,7 +2183,7 @@ class App(tk.Tk):
         mapping={"throttle":"throttle_text","engine":"engine_text","flight":"flight_text","attitude":"attitude_text",
                  "controls":"controls_text","recording":"recording_text","progress":"progress_text"}
         connection_text = f"Sim Flight Model {'Connected' if state.get('connected') else 'Disconnected'}"
-        connection_text += ' | P3D throttle control' if state.get('control_method') == 'engine_step' else f" | CLS2sim Connection: {'Connected' if state.get('brunner_connected') else 'Disconnected'}"
+        connection_text += ' | P3D throttle control' if state.get('control_method') in ('engine_step', 'power_dynamics') else f" | CLS2sim Connection: {'Connected' if state.get('brunner_connected') else 'Disconnected'}"
         self._common_view_vars["connection"].set(connection_text)
         for key,field in mapping.items(): self._common_view_vars[key].set((state.get(field) or "N/A").replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim"))
         telemetry=state.get("telemetry") or {}
@@ -2206,8 +2213,8 @@ class App(tk.Tk):
         self._common_view_labels["recording_indicator"].configure(fg=COL["green"] if recording_live else COL["dim"])
 
         if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
-            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)', '2.a.(4)', '2.c.(8b)')
-                               and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control", "pitch_trim")))
+            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)', '2.a.(4)', '2.c.(8b)', '2.b.(11)')
+                               and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control", "pitch_trim", "power_dynamics")))
             if is_special_auto:
                 if self.common_reference_frame.winfo_manager():
                     self.common_reference_frame.pack_forget()
@@ -2248,7 +2255,7 @@ class App(tk.Tk):
                     return
             from qtg_common_engine import launch,validate_duration,validate_reference
             duration=validate_duration(self._common_duration_var.get())
-            if control_method not in (None,"pid","replay","engine_step","static_control","pitch_trim","stall"):raise ValueError("Unknown automatic control method")
+            if control_method not in (None,"pid","replay","engine_step","static_control","pitch_trim","stall","power_dynamics"):raise ValueError("Unknown automatic control method")
             fields, _ = self._test_settings[spec.reference]
             missing_fields = any(not var.get().strip() for var in fields.values())
             reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)') and missing_fields)
@@ -2259,6 +2266,7 @@ class App(tk.Tk):
             static_control_automatic = mode == 'auto' and spec.reference in ('2.a.(1)', '2.a.(2)', '2.a.(3)') and not reference_only
             trim_automatic = mode == 'auto' and spec.reference == '2.a.(4)' and not reference_only
             stall_automatic = mode == 'auto' and spec.reference == '2.c.(8b)' and not reference_only
+            power_dynamics_automatic = mode == 'auto' and spec.reference == '2.b.(11)' and not reference_only
             if mode == "auto" and spec.reference == "1.c.(1)" and control_method is None:
 
                 selected_method = self._automatic_methods[spec.reference].get()
@@ -2273,11 +2281,13 @@ class App(tk.Tk):
                 method = 'pitch_trim'
             elif stall_automatic:
                 method = 'stall'
+            elif power_dynamics_automatic:
+                method = 'power_dynamics'
             else:
 
                 method = control_method or "replay"
 
-            if engine_automatic or static_control_automatic or trim_automatic or stall_automatic:
+            if engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic:
                 if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
                     self.common_reference_frame.pack_forget()
             elif mode == "manual" and spec.reference in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)'):
@@ -2348,7 +2358,7 @@ class App(tk.Tk):
                 if validation and not Path(validation).is_file():
                     raise ValueError("Validation dataset not found.")
             from backend.engine_initialization_adapter import requested
-            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
+            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
             if mode=="auto" and (method=="replay" or universal):
                 if not reference:
@@ -2370,7 +2380,7 @@ class App(tk.Tk):
                 if state.get("controlling") or state.get("recording") or state.get("stage") in ("Initializing aircraft","Generating reports"):
                     self.common_status.configure(text="Stop the active test and wait for preparation to finish before initializing again.",fg=COL["amber"])
                     return
-                if (method in ('engine_step', 'static_control', 'pitch_trim', 'stall') or self._common_context.get('control_method') in ('engine_step', 'static_control', 'pitch_trim', 'stall')):
+                if (method in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics') or self._common_context.get('control_method') in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics')):
                     self._common_command('shutdown')
                     self.common_record_button.configure(state='disabled')
                     self.common_status.configure(text='Closing the previous test worker before initialization...', fg=COL['blue'])
@@ -2417,10 +2427,12 @@ class App(tk.Tk):
                 status_desc = 'Auto (Static Control)'
             elif engine_automatic:
                 status_desc = 'Auto (P3D Throttle Step)'
+            elif power_dynamics_automatic:
+                status_desc = 'Auto (Power Change Dynamics)'
             else:
                 status_desc = ("Auto (PID)" if (mode == "auto" and method == "pid") else ("Auto (Replay)" if (mode == "auto" and method == "replay") else mode.title()))
-            connection_desc = 'Sim Flight Model and CLS2sim' if static_control_automatic else ('Sim Flight Model' if engine_automatic else 'Sim Flight Model and CLS2sim connection')
-            if engine_automatic or static_control_automatic:
+            connection_desc = 'Sim Flight Model and CLS2sim' if static_control_automatic else ('Sim Flight Model' if (engine_automatic or power_dynamics_automatic) else 'Sim Flight Model and CLS2sim connection')
+            if engine_automatic or static_control_automatic or power_dynamics_automatic:
                 self.common_status.configure(text=f"{status_desc}: connecting to {connection_desc}...", fg=COL["blue"])
             else:
                 self.common_status.configure(text=f"{status_desc}: initializing {connection_desc}...", fg=COL["blue"])

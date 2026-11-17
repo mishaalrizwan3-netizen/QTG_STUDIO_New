@@ -129,7 +129,7 @@ class AllTestSettingsGUI(unittest.TestCase):
             app = main.App()
             app.withdraw()
             try:
-                self.assertEqual(len(main.TESTS), 31)
+                self.assertEqual(len(main.TESTS), 32)
                 for index, spec in enumerate(main.TESTS):
                     with self.subTest(reference=spec.reference):
                         app.select_test(index)

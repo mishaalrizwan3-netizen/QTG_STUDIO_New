@@ -291,9 +291,11 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
         raise ValueError('Pitch trim button sweep requires Automatic Testing')
     if control_method == 'stall' and mode != 'auto':
         raise ValueError('Stall control requires Automatic Testing')
+    if control_method == 'power_dynamics' and mode != 'auto':
+        raise ValueError('Power Change Dynamics requires Automatic Testing')
     policy=engine_test_policy(spec.reference)
     duration_s=validate_duration(policy.DURATION_SECONDS if policy else (75 if duration_s is None else duration_s))
-    if control_method == 'engine_step':
+    if control_method in ('engine_step', 'power_dynamics'):
         duration_s = 35  # Five-second baseline plus the bounded response window.
     initial_condition_overrides = None
     if spec.reference == '1.f.(2)':
@@ -305,7 +307,7 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
         initial_conditions = resolve_initial_conditions(initial_condition_overrides)
     else:
         initial_conditions=validate_conditions(initial_conditions)
-    if spec.reference == '2.a.(8)' and (mode != 'manual' or not initial_conditions.get('on_ground') or initial_conditions.get('ias_kt') != 0):
+    if spec.reference == '2.a.(8)' and (mode != 'manual' or not (initial_conditions or {}).get('on_ground') or (initial_conditions or {}).get('ias_kt') != 0):
         raise ValueError('Throttle lever alignment requires Manual mode, Ground and zero IAS.')
     if spec.reference in ('1.f.(1)', '1.f.(2)') and (mode == 'manual' or control_method == 'engine_step'):
         from backend.engine_conditions import enforce
@@ -313,7 +315,7 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
     brunner_root()
     validate_method(spec.reference, control_method)
     from backend.engine_initialization_adapter import requested
-    universal_auto = mode == 'auto' and control_method not in ('engine_step', 'pitch_trim', 'stall') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
+    universal_auto = mode == 'auto' and control_method not in ('engine_step', 'pitch_trim', 'stall', 'power_dynamics') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
     if mode=='auto' and (control_method=='replay' or universal_auto):
         if not reference:
             raise ValueError('Select a Manual reference CSV before Universal Automatic initialization; GUI targets cannot substitute.')
@@ -341,6 +343,8 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
     context_path=output/(token+'_context.json')
     if control_method == 'engine_step':
         context['initialization_policy'] = 'Operator aircraft settings; P3D throttle only; no BRUNNER ownership'
+    if control_method == 'power_dynamics':
+        context['initialization_policy'] = 'Approach stabilization then throttle step; free response; no BRUNNER or PID commands'
     if control_method == 'static_control':
         context['initialization_policy'] = 'Operator aircraft settings; exclusive axis motion; no other axis movement'
     if spec.reference == '1.f.(2)':
@@ -1149,6 +1153,13 @@ def run(context_path):
         except PermissionError:
             # The Tk reader may briefly hold the file on Windows. Publish next tick.
             temporary.unlink(missing_ok=True)
+    from backend.automatic_power_change import selected as power_change_selected
+    if power_change_selected(context):
+        from contextlib import redirect_stdout, redirect_stderr
+        from backend.automatic_power_change import run as run_power_dynamics
+        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                return run_power_dynamics(context, publish)
     from backend.automatic_engine import selected
     if selected(context):
         from contextlib import redirect_stdout, redirect_stderr

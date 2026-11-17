@@ -1,0 +1,13 @@
+{
+  "reference": "2.b.(11)",
+  "title": "Power change dynamics (longitudinal c.(1))",
+  "category": "Longitudinal Handling",
+  "availability": "SEP catalog test",
+  "objective": "Power change from thrust for approach or level flight to maximum continuous or go-around power. Time history of uncontrolled free response for a time increment equal to at least 5 s before initiation of the power change to completion of the power change + 15 s.",
+  "initial_conditions_catalog": "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 1 | Latitude[deg]: 32.235 | Longitude[deg]: 74.135 | Heading[deg]: 48.4 | Pitch[deg]: 3 | Bank[deg]: 0 | Throttle[%]: 50 | Temperature[C]: 15",
+  "tolerance_catalog": "± 3 kt airspeed | ± 30 m (100 ft) altitude | ± 1.5° or ± 20 % pitch angle",
+  "reference_pdf_page": "74",
+  "definition_source": "test_catalog.csv",
+  "runtime_configuration": "Existing main.py test settings and common engine remain authoritative",
+  "results_directory": "D:/QTG_Test_Results/2_b_11_Power_change_dynamics"
+}
