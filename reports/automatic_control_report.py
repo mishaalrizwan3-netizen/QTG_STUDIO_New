@@ -34,6 +34,7 @@ DEFAULT_SELECTED_BY_REF = {
     '2.a.(1)': ['ias_kt', 'pitch_position', 'pitch_force'],
     '2.a.(2)': ['ias_kt', 'roll_position', 'roll_force'],
     '2.a.(3)': ['ias_kt', 'rudder_position', 'rudder_force'],
+    '2.a.(4)': ['trim_indicator', 'trim_position_rad', 'trim_value_pct', 'trim_elevator_surface_rad'],
     '2.c.(8b)': ['ias_kt', 'stall_warning', 'stall_aoa', 'pitch_deg', 'bank_deg', 'pitch_position'],
 }
 
@@ -236,6 +237,23 @@ def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reaso
     # 2. Write Metadata
     is_trim = test_ref == '2.a.(4)'
     is_stall = test_ref == '2.c.(8b)'
+    trim_metrics = context.get('pitch_trim_metrics', {})
+    travel_time = trim_metrics.get('total_travel_time_s')
+    avg_rate_pct = trim_metrics.get('average_trim_rate_pct_s')
+    avg_rate_pos = trim_metrics.get('average_trim_rate_pos_s')
+    if is_trim and travel_time is None and rows:
+        try:
+            t0 = float(rows[0].get('Time (s)', 0.0))
+            t1 = float(rows[-1].get('Time (s)', 0.0))
+            travel_time = max(0.1, t1 - t0)
+            p0 = float(rows[0].get('Elevator Trim Indicator (position)', 0.0))
+            p1 = float(rows[-1].get('Elevator Trim Indicator (position)', 0.0))
+            d_pos = abs(p0 - p1)
+            avg_rate_pos = d_pos / travel_time
+            avg_rate_pct = avg_rate_pos * 100.0
+        except Exception:
+            travel_time = avg_rate_pct = avg_rate_pos = 0.0
+
     metadata = dict(
         context,
         result=result,
@@ -248,6 +266,14 @@ def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reaso
         measurement_source=('CLS2Sim trim button actions; P3D SimConnect' if is_trim else 'BRUNNER CLS2Sim UDP load-cell force & position; P3D SimConnect'),
         validation=('Stall warning cycle; no automatic grading' if is_stall else 'Pitch trim sweep; no automatic grading' if is_trim else 'Static position vs force characteristic verification'),
     )
+    if is_trim:
+        metadata.update({
+            'total_travel_time_s': travel_time,
+            'average_trim_rate_pct_s': avg_rate_pct,
+            'average_trim_rate_pos_s': avg_rate_pos,
+            'trim_start_position': trim_metrics.get('start_trim_pos'),
+            'trim_end_position': trim_metrics.get('final_trim_pos'),
+        })
     metadata_path.write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding='utf-8')
     outputs.append(str(metadata_path))
 
@@ -285,6 +311,26 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
     tm = _series(df, 'Time (s)')
     t_max = _recorded_duration(tm)
 
+    trim_subtitle = None
+    if test_ref == '2.a.(4)':
+        metrics = context.get('pitch_trim_metrics', {})
+        t_time = metrics.get('total_travel_time_s')
+        r_pct = metrics.get('average_trim_rate_pct_s')
+        r_pos = metrics.get('average_trim_rate_pos_s')
+        if t_time is None and rows:
+            try:
+                t0 = float(rows[0].get('Time (s)', 0.0))
+                t1 = float(rows[-1].get('Time (s)', 0.0))
+                t_time = max(0.1, t1 - t0)
+                p0 = float(rows[0].get('Elevator Trim Indicator (position)', 0.0))
+                p1 = float(rows[-1].get('Elevator Trim Indicator (position)', 0.0))
+                r_pos = abs(p0 - p1) / t_time
+                r_pct = r_pos * 100.0
+            except Exception:
+                t_time = r_pct = r_pos = 0.0
+        if t_time is not None:
+            trim_subtitle = f"Total Travel Time: {t_time:.1f} s  |  Average Trim Rate: {r_pct:.2f} %/s ({r_pos:.3f} pos/s)"
+
     # Determine which items are requested
     chosen_items = []
     for key in selected:
@@ -318,7 +364,9 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
             _initial_page(pdf, 'auto', str(csv_path), df, ref_df, virtual_forces=ref_df is not None and test_ref != '2.c.(8b)', missing_label='N/A')
             count = len(chosen_items)
             fig, axes = plt.subplots(count, 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
-            fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
+            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else 'Selected test graphs', fontsize=14, fontweight='bold')
+            if trim_subtitle:
+                fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             for ax, (label, values, _) in zip(axes[:, 0], chosen_items):
                 ax.plot(tm, values, color='#0066cc', linewidth=1.6, label='Automatic Test (Sim)')
                 _style_axis(ax, label)
@@ -337,7 +385,9 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
         if not chosen_items:
             # Fallback if nothing was matched
             fig, ax = plt.subplots(1, 1, figsize=(8.27, 11.69), constrained_layout=True)
-            fig.suptitle('1st Quadrant Combined Flight & Control Parameters', fontsize=15, fontweight='bold')
+            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
+            if trim_subtitle:
+                fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             ax.text(0.5, 0.5, 'No parameters selected for display', transform=ax.transAxes, ha='center', color='gray')
             pdf.savefig(fig)
             plt.close(fig)
@@ -346,7 +396,9 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
         # If 4 or fewer items, present them together on Page 2 for direct visual correlation
         if len(chosen_items) <= 4:
             fig, axes = plt.subplots(len(chosen_items), 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
-            fig.suptitle('1st Quadrant Combined Flight & Control Parameters', fontsize=15, fontweight='bold')
+            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
+            if trim_subtitle:
+                fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             for ax, (label, values, _) in zip(axes[:, 0], chosen_items):
                 ax.plot(tm, values, color='#0066cc', linewidth=2.0, label='Automatic Test (Sim)')
                 if not np.isfinite(np.asarray(values, dtype=float)).any():

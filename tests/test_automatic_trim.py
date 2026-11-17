@@ -29,6 +29,8 @@ class AutomaticTrimTests(unittest.TestCase):
         self.worker = AutomaticTrim(context(), self.sim, self.brunner, lambda _: None,
                                     self.reader, clock=lambda: self.now, events=self.events)
         self.worker.phase, self.worker.stage = 'READY', 'READY TO RECORD'
+        self.worker.start_trim_pos = 1.0
+        self.worker.verified_nose_up_limit = 1.0
 
     def frame(self, sequence, angle, indicator=0.):
         return dict(sequence=sequence, receipt_time=self.now, trim_rad=angle / 2,
@@ -48,20 +50,7 @@ class AutomaticTrimTests(unittest.TestCase):
         self.socket.send.assert_not_called()
         self.brunner.write_setting.assert_not_called()
 
-    def test_automatic_sends_p3d_trim_before_first_telemetry_frame(self):
-        self.worker.command({'action': 'record'})
-        self.reader.poll.return_value = None
-        self.now = 10.11
-        self.worker.step()
-        self.now = 10.24
-        self.worker.step()
-        self.now = 10.33
-        self.worker.step()
-        self.assertEqual([call.args[0] for call in self.events.step.call_args_list], [UP, UP])
-        self.socket.send.assert_not_called()
-        self.brunner.write_setting.assert_not_called()
-
-    def test_aircraft_initialization_reaches_ready_without_actuator_motion(self):
+    def test_aircraft_initialization_sets_trim_to_full_nose_up_and_waits_1s(self):
         conditions = {'on_ground': False, 'alt_ft': 755., 'ias_kt': 0., 'lat': 32., 'lon': 74.,
                       'heading_deg': 0., 'throttle': 5.}
         self.sim.get_telemetry_sequence.return_value = 1
@@ -72,47 +61,112 @@ class AutomaticTrimTests(unittest.TestCase):
         self.brunner.read_axis.return_value = (0., 0., 0.)
         worker = AutomaticTrim(dict(context(), initial_conditions=conditions), self.sim, self.brunner,
                                lambda _: None, self.reader, clock=lambda: self.now, events=self.events)
+
+        # 1. P3D conditions initialization
         worker.step()
+        self.assertEqual(worker.stage, 'Initializing aircraft')
+        worker.step()
+        # Aircraft positioning verified, intercepted into DRIVE_UP
+        self.assertEqual(worker.init_trim_phase, 'DRIVE_UP')
+
+        # 2. Drive trim up to verified limit
+        self.now += 0.05
+        self.reader.poll.return_value = self.frame(1, 0.1, indicator=0.999)
+        worker.step()
+        # Limit reached, transitions to WAIT_1S
+        self.assertEqual(worker.init_trim_phase, 'WAIT_1S')
+        self.assertAlmostEqual(worker.verified_nose_up_limit, 0.999)
+
+        # 3. Wait 1 second and confirm starting position
+        self.now += 0.5
+        worker.step()
+        self.assertNotEqual(worker.stage, 'READY TO RECORD')
+
+        self.now += 0.6
         worker.step()
         self.assertEqual(worker.stage, 'READY TO RECORD')
         self.assertTrue(worker.status()['can_record'])
+        self.assertAlmostEqual(worker.start_trim_pos, 0.999)
         self.socket.send.assert_not_called()
         self.brunner.write_setting.assert_not_called()
 
-    def test_two_full_indicator_sweeps_stop_at_second_minus_one(self):
+    def test_step_by_step_nose_up_to_nose_down_sequence(self):
         self.brunner.read_axis.return_value = (.12, .03, 0.)
         self.worker.command({'action': 'record'})
-        with patch('reports.automatic_control_report.save', return_value=['test.csv', 'test.pdf']) as save:
-            for sequence, indicator in enumerate((.25, .7, 1., .7, 0., -.7, -1., -.7, 0., .7, 1., .7, 0., -.7, -1.), 1):
-                self.now += .18
-                self.reader.poll.return_value = self.frame(sequence, -.1, indicator)
-                self.worker.step()
-                self.assertNotEqual(self.worker.result, 'COMPLETE')
-            self.assertTrue(self.worker.sweep_complete)
-            sent_before_hold = self.events.step.call_count
-            self.now = 12.99
-            self.reader.poll.return_value = self.frame(16, -.1, -1.)
+        self.assertEqual(self.worker.record_state, 'RECORDING_START')
+
+        with patch('reports.automatic_control_report.save', return_value=['test.csv', 'test.qtg_test.json', 'test.pdf']) as save:
+            # Step 1: Initial baseline frame at t=0
+            self.reader.poll.return_value = self.frame(1, -.1, indicator=1.0)
             self.worker.step()
+            self.assertEqual(self.events.step.call_args_list[-1].args[0], DOWN)
+            self.assertEqual(self.worker.record_state, 'WAIT_STEP')
+            self.assertEqual(self.worker.step_count, 1)
+
+            # Wait during Step 1 (e.g. 0.5s elapsed)
+            self.now += 0.5
+            self.reader.poll.return_value = self.frame(2, -.1, indicator=0.8)
+            self.worker.step()
+            self.assertEqual(self.worker.record_state, 'WAIT_STEP')
+            self.assertEqual(self.worker.step_count, 1)
+
+            # 1.0s elapsed on Step 1: verifies actual trim moved to 0.6, sends Step 2
+            self.now += 0.51
+            self.reader.poll.return_value = self.frame(3, -.1, indicator=0.6)
+            self.worker.step()
+            self.assertEqual(self.worker.step_count, 2)
+            self.assertEqual(self.events.step.call_args_list[-1].args[0], DOWN)
+
+            # 1.0s elapsed on Step 2: trim at 0.2, sends Step 3
+            self.now += 1.01
+            self.reader.poll.return_value = self.frame(4, -.1, indicator=0.2)
+            self.worker.step()
+            self.assertEqual(self.worker.step_count, 3)
+
+            # 1.0s elapsed on Step 3: trim at -0.2, sends Step 4
+            self.now += 1.01
+            self.reader.poll.return_value = self.frame(5, -.1, indicator=-0.2)
+            self.worker.step()
+            self.assertEqual(self.worker.step_count, 4)
+
+            # 1.0s elapsed on Step 4: trim at -0.6, sends Step 5
+            self.now += 1.01
+            self.reader.poll.return_value = self.frame(6, -.1, indicator=-0.6)
+            self.worker.step()
+            self.assertEqual(self.worker.step_count, 5)
+
+            # 1.0s elapsed on Step 5: trim reaches full nose-down limit at -1.0, sends Step 6
+            self.now += 1.01
+            self.reader.poll.return_value = self.frame(7, -.1, indicator=-1.0)
+            self.worker.step()
+            self.assertEqual(self.worker.step_count, 6)
+
+            # 1.0s elapsed on Step 6: trim did NOT move past -1.0 (verified limit reached!)
+            self.now += 1.01
+            self.reader.poll.return_value = self.frame(8, -.1, indicator=-1.0)
+            self.worker.step()
+            self.assertEqual(self.worker.record_state, 'HOLD_FINAL')
+            self.assertAlmostEqual(self.worker.verified_nose_down_limit, -1.0)
             self.assertNotEqual(self.worker.result, 'COMPLETE')
-            self.assertEqual(self.events.step.call_count, sent_before_hold)
-            self.now = 13.05
-            self.reader.poll.return_value = self.frame(17, -.1, -1.)
+
+            # Holding final position: 0.5s into hold
+            self.now += 0.5
+            self.reader.poll.return_value = self.frame(9, -.1, indicator=-1.0)
             self.worker.step()
-            self.assertEqual(self.worker.result, 'COMPLETE', self.worker.details)
-            self.assertGreaterEqual(self.worker.rows[-1]['Time (s)'], 3.)
-            self.assertEqual(self.events.step.call_count, sent_before_hold)
-            self.assertEqual(self.worker.rows[0]['Elevator Trim (%)'], 25.)
-            self.assertEqual(self.worker.rows[-1]['Elevator Trim Indicator (position)'], -1.)
-            self.assertEqual(self.worker.outputs, ['test.csv', 'test.pdf'])
-            self.assertTrue(all('Joystick Pitch Position (mm)' in row for row in self.worker.rows))
-            self.assertTrue(all('Joystick Pitch Force (N)' in row for row in self.worker.rows))
-            sent = [call.args[0] for call in self.events.step.call_args_list]
-            groups = [sent[0]]
-            for direction in sent[1:]:
-                if direction != groups[-1]: groups.append(direction)
-            self.assertEqual(groups, [UP, DOWN, UP, DOWN])
-            self.socket.send.assert_not_called()
+            self.assertEqual(self.worker.record_state, 'HOLD_FINAL')
+            self.assertNotEqual(self.worker.result, 'COMPLETE')
+
+            # 1.0s final hold complete: automatically finishes and generates reports
+            self.now += 0.55
+            self.reader.poll.return_value = self.frame(10, -.1, indicator=-1.0)
+            self.worker.step()
+            self.assertEqual(self.worker.result, 'COMPLETE')
+            self.assertEqual(self.worker.outputs, ['test.csv', 'test.qtg_test.json', 'test.pdf'])
+            self.assertGreater(self.worker.total_travel_time, 0)
+            self.assertGreater(self.worker.average_trim_rate_pct, 0)
             save.assert_called_once()
+
+        self.socket.send.assert_not_called()
         self.brunner.write_setting.assert_not_called()
 
     def test_stale_telemetry_stops_trim_events_and_fails(self):
@@ -133,45 +187,52 @@ class AutomaticTrimTests(unittest.TestCase):
         self.socket.send.assert_not_called()
         self.brunner.write_setting.assert_not_called()
 
-    def test_timeout_stops_without_reaching_indicator_endpoint(self):
+    def test_unresponsive_trim_stops_and_fails_safely(self):
         self.worker.command({'action': 'record'})
-        self.reader.poll.return_value = self.frame(1, 0.)
+        self.reader.poll.return_value = self.frame(1, 0., indicator=0.8)
         self.worker.step()
-        self.now += 31.
-        self.reader.poll.return_value = self.frame(2, .05)
+        self.assertEqual(self.worker.step_count, 1)
+
+        # Step 1 expires with no movement (trim remains at 0.8, which is NOT nose-down limit)
+        self.now += 1.05
+        self.reader.poll.return_value = self.frame(2, 0., indicator=0.8)
+        self.worker.step()
+        self.assertEqual(self.worker.unresponsive_steps, 1)
+
+        # Retry 1 expires with no movement
+        self.now += 1.05
+        self.reader.poll.return_value = self.frame(3, 0., indicator=0.8)
+        self.worker.step()
+        self.assertEqual(self.worker.unresponsive_steps, 2)
+
+        # Retry 2 expires with no movement -> Exceeds UNRESPONSIVE_LIMIT (3) and fails
+        self.now += 1.05
+        self.reader.poll.return_value = self.frame(4, 0., indicator=0.8)
         with patch('reports.automatic_control_report.save', return_value=[]):
             self.worker.step()
         self.assertEqual(self.worker.result, 'FAILED')
-        self.assertIn('timeout', self.worker.details)
-        self.socket.send.assert_not_called()
+        self.assertIn('stopped responding', self.worker.details)
 
-    def test_no_p3d_trim_movement_fails_with_clear_diagnostic(self):
-        self.worker.command({'action': 'record'})
-        self.now += .2
-        self.reader.poll.return_value = self.frame(1, 0.)
-        self.worker.step()
-        self.now += 3.1
-        self.reader.poll.return_value = self.frame(2, 0.)
-        with patch('reports.automatic_control_report.save', return_value=[]):
-            self.worker.step()
-        self.assertEqual(self.worker.result, 'FAILED')
-        self.assertIn('P3D elevator trim did not move', self.worker.details)
-
-    def test_real_csv_pdf_contains_trim_graphs(self):
+    def test_real_csv_pdf_contains_trim_graphs_and_metrics(self):
         import fitz
         from reports.automatic_control_report import save
         with tempfile.TemporaryDirectory() as folder:
-            data = dict(context(), result_directory=folder, title='Pitch trim', selected_graphs=['trim_position_rad','trim_indicator','trim_elevator_surface_rad'])
-            rows = [{'Time (s)': t, 'Elevator Trim Angle (rad)': t / 10,
-                     'Elevator Trim Indicator (position)': -.5, 'Elevator Trim (%)': 10.,
+            data = dict(context(), result_directory=folder, title='Pitch trim',
+                        selected_graphs=['trim_position_rad', 'trim_indicator', 'trim_value_pct', 'trim_elevator_surface_rad'],
+                        pitch_trim_metrics={'total_travel_time_s': 20.0, 'average_trim_rate_pct_s': 10.0, 'average_trim_rate_pos_s': 0.1,
+                                            'start_trim_pos': 1.0, 'final_trim_pos': -1.0})
+            rows = [{'Time (s)': t, 'Elevator Trim Angle (rad)': (1.0 - t / 10.0) * 0.2,
+                     'Elevator Trim Indicator (position)': 1.0 - t / 10.0, 'Elevator Trim (%)': (1.0 - t / 10.0) * 100.,
                      'Elevator Surface (rad)': .1} for t in (0., 1., 2.)]
             outputs = save(data, rows, 'COMPLETE', 'offline')
             self.assertIn('Elevator Trim Indicator (position)', Path(outputs[0]).read_text())
             with fitz.open(outputs[2]) as doc:
-                self.assertEqual(len(doc), 2)
+                self.assertGreaterEqual(len(doc), 2)
                 page = doc[1].get_text()
                 self.assertIn('Elevator Trim Indicator', page)
                 self.assertIn('Elevator Surface', page)
+                self.assertIn('Total Travel Time', page)
+                self.assertIn('Average Trim Rate', page)
 
     def test_gui_dispatches_only_pitch_trim_automatic(self):
         from frontend.main import App, TESTS
@@ -204,11 +265,11 @@ class AutomaticTrimTests(unittest.TestCase):
         sim.wait_for_fresh_telemetry.return_value = {'engine_throttle_percent': 5., 'airspeed_indicated': 0., 'indicated_altitude': 755.}
         sim.get_telemetry.return_value = dict(sim.wait_for_fresh_telemetry.return_value, engine_rpm=2200.)
         class Reader:
-            angle = 0.
+            angle = 0.4
             sequence = 0
             def poll(self):
                 self.sequence += 1
-                if events.direction == UP: self.angle = min(.4, self.angle + .1)
+                if events.direction == UP: self.angle = min(.4, self.angle + .05)
                 if events.direction == DOWN: self.angle = max(-.4, self.angle - .1)
                 return dict(sequence=self.sequence, receipt_time=time.monotonic(), elevator_rad=self.angle,
                             trim_rad=self.angle/2, indicator=self.angle/.4, trim_fraction=self.angle/.4)
