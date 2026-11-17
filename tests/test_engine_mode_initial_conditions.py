@@ -80,7 +80,7 @@ class EngineInitialConditionsTests(unittest.TestCase):
                 tick = iter((10., 10., 10., 16.))
                 reader = Mock()
                 reader.poll.return_value = dict(parking_brake=brake, on_ground=ground,
-                                                ground_speed=speed, receipt_time=10.-age)
+                                                ground_speed=speed, receipt_time=10.-age, sequence=1)
                 window = SimpleNamespace(p3d=Mock(is_connected=Mock(return_value=True)),
                                          stop_worker_event=Mock(is_set=Mock(return_value=False)))
                 if success:

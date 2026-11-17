@@ -18,6 +18,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.ticker import MaxNLocator
 
 
 
@@ -304,9 +305,16 @@ def _style_axis(ax, ylabel):
 
     ax.grid(True, which="minor", alpha=0.20, linewidth=0.45)
 
-    ax.set_xlim(0, 75)
-
-    ax.set_xticks(np.arange(0, 76, 5))
+    times = []
+    for line in ax.lines:
+        try:
+            values = np.asarray(line.get_xdata(), dtype=float)
+            times.extend(values[np.isfinite(values)])
+        except (TypeError, ValueError):
+            pass
+    end = max(times) if times else 1.0
+    ax.set_xlim(0, max(float(end), .001))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
 
     ax.set_xlabel("Time (s)", fontweight="bold")
 
@@ -495,7 +503,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
 
 
-    if is_auto:
+    if is_auto and ref_df is not None:
 
         ax.text(0.105,0.758,"Validation",fontsize=6.5,family="monospace",ha="right")
 
@@ -535,11 +543,11 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
             ("Throttle Position (%)","Throttle 1 Position (%)"),
 
-            ("Pitch Force: Applied/Virtual (N)" if is_auto else "Pitch Applied Force (N)","Joystick Pitch Force (N)"),
+            ("Pitch Force: Applied/Virtual (N)" if is_auto and ref_df is not None else "Pitch Applied Force (N)","Joystick Pitch Force (N)"),
 
-            ("Roll Force: Applied/Virtual (N)" if is_auto else "Roll Applied Force (N)","Joystick Roll Force (N)"),
+            ("Roll Force: Applied/Virtual (N)" if is_auto and ref_df is not None else "Roll Applied Force (N)","Joystick Roll Force (N)"),
 
-            ("Yaw Force: Applied/Virtual (N)" if is_auto else "Yaw Applied Force (N)","Rudder Pedal Force (N)")]),
+            ("Yaw Force: Applied/Virtual (N)" if is_auto and ref_df is not None else "Yaw Applied Force (N)","Rudder Pedal Force (N)")]),
 
         ("*** Environment Parameters ***", [
 
@@ -609,6 +617,34 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
 
 
+    stall_report = 'Stall Warning (0/1)' in sim_df.columns
+    if stall_report:
+        missing_label = 'N/A'
+        positions = {'Joystick Pitch Position (mm)': 'Pitch Control Position (mm)',
+                     'Joystick Roll Position (mm)': 'Roll Control Position (mm)',
+                     'Rudder Pedal Position (mm)': 'Rudder Pedal Position (mm)'}
+        def stall_row(label, key):
+            if key in positions:
+                return positions[key], key
+            if key == 'CG Pos in X Axis (mm)':
+                return 'CG Longitudinal (% reference chord)', 'CG Longitudinal (% reference chord)'
+            if key == 'CG Pos in Y Axis (mm)':
+                return 'CG Lateral (% reference chord)', 'CG Lateral (% reference chord)'
+            return label, key
+        left_sections = [(title, [stall_row(label, key) for label, key in rows]) for title, rows in left_sections]
+
+    elif is_auto:
+        # The bridge reports CG PERCENT and CG LATERAL in feet, not X/Y millimetres.
+        # Show the measured units when present; never present those values as mm.
+        cg_rows = {
+            'CG Pos in X Axis (mm)': ('CG Pos (% MAC)', 'CG Pos (% MAC)'),
+            'CG Pos in Y Axis (mm)': ('CG Lateral (ft)', 'CG Lateral (ft)'),
+        }
+        left_sections = [
+            (title, [cg_rows.get(key, (label, key)) for label, key in rows])
+            for title, rows in left_sections
+        ]
+
     if virtual_forces or mode=="pid":
         force_keys={'Joystick Pitch Force (N)':'Pitch Virtual Force 0x51 (N)','Joystick Roll Force (N)':'Roll Virtual Force 0x51 (N)','Rudder Pedal Force (N)':'Yaw Virtual Force 0x51 (N)'}
         left_sections=[(title,[(label.replace('Applied Force','Virtual Force'),force_keys.get(key,key)) for label,key in rows]) for title,rows in left_sections]
@@ -621,7 +657,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
         force_axes = {"Joystick Pitch Force (N)": "Pitch", "Joystick Roll Force (N)": "Roll", "Rudder Pedal Force (N)": "Yaw"}
 
-        if mode=="auto" and key in force_axes:
+        if mode=="auto" and ref_df is not None and key in force_axes and not stall_report:
 
             force = _automatic_virtual_force_inverted(sim_df, force_axes[key])
 
@@ -632,12 +668,17 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
                 ref_force = _manual_applied_force(ref_df, force_axes[key])
 
                 refv = _fmt(ref_force[0]) if len(ref_force) else "-"
+                if refv == "-":
+                    refv = missing_label
 
                 return refv, simv
 
         if is_auto and ref_df is not None:
 
-            return _fmt(_safe(ref_df,key)), simv
+            refv = _fmt(_safe(ref_df,key))
+            if refv == "-":
+                refv = missing_label
+            return refv, simv
 
         return "", simv
 
@@ -655,7 +696,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
                 refv,simv = values(key)
 
-                if is_auto:
+                if is_auto and ref_df is not None:
 
                     ax.text(x+0.055,y,refv,fontsize=6.15,family="monospace",ha="right")
 
@@ -685,6 +726,20 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
 
 
 
+def _recorded_duration(*series):
+    finite = np.concatenate([np.asarray(t, dtype=float)[np.isfinite(np.asarray(t, dtype=float))] for t in series if t is not None]) if any(t is not None and len(t) for t in series) else np.array([])
+    if not finite.size:
+        return 1.0
+    end = max(float(np.max(finite)), .001)
+    whole_second = math.ceil(end)
+    return float(whole_second) if 0 < whole_second - end <= .05 else end
+
+
+def _set_recorded_time(ax, duration):
+    ax.set_xlim(0, duration)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+
+
 def _selected_report(csv_path, out_path, selected, manual_path=None):
     """Render the existing report groups using only the operator's selections."""
     measured = _read_csv(csv_path)
@@ -695,9 +750,53 @@ def _selected_report(csv_path, out_path, selected, manual_path=None):
         ('Group 1 (Airspeed, Climb, Altitude)', [('ias_kt','Indicated Airspeed (kts)'),('vertical_speed_fpm','Rate of Climb/Descent (fpm)'),('altitude_msl_ft','Indicated Altitude (ft)'),('height_agl_ft','Radar Alt (ft)'),('ground_speed_kt','Ground Speed (kt)')]),
         ('Group 2 (Attitude and Heading)', [('pitch_deg','Pitch Angle (deg)'),('bank_deg','Bank Angle (deg)'),('heading_deg','Magnetic Heading (deg)'),('pitch_rate','Pitch Rate (deg/s)'),('yaw_rate','Yaw Rate (deg/s)')]),
         ('Group 3 (Engine)', [('prop_rpm','Propeller 1 RPM'),('engine_rpm','Engine 1 RPM'),('throttle_pct','Throttle 1 Position (%)'),('manifold_inhg','Manifold Pressure (inHg)'),('fuel_flow_pph','Fuel Flow (pph)')]),
-        ('Group 4 (Controls)', [('pitch_position','Joystick Pitch Position (mm)'),('pitch_force','Pitch Applied Force (N)'),('roll_position','Joystick Roll Position (mm)'),('roll_force','Roll Applied Force (N)'),('rudder_position','Rudder Pedal Position (mm)'),('rudder_force','Yaw Applied Force (N)'),('elevator_input_norm','Measured Elevator Input (normalised)'),('aileron_input_norm','Measured Aileron Input (normalised)'),('rudder_input_norm','Measured Rudder Input (normalised)'),('titt','Ti/Tt response analysis')])]
+        ('Group 4 (Controls)', [('pitch_position','Joystick Pitch Position (mm)'),('pitch_force','Pitch Applied Force (N)'),('roll_position','Joystick Roll Position (mm)'),('roll_force','Roll Applied Force (N)'),('rudder_position','Rudder Pedal Position (mm)'),('rudder_force','Yaw Applied Force (N)'),('elevator_input_norm','Measured Elevator Input (normalised)'),('aileron_input_norm','Measured Aileron Input (normalised)'),('rudder_input_norm','Measured Rudder Input (normalised)'),('titt','Ti/Tt response analysis')]),
+        ('Pitch trim', [('trim_position_rad', 'Elevator Trim Angle (rad)'), ('trim_indicator', 'Elevator Trim Indicator (position)'), ('trim_value_pct', 'Elevator Trim (%)'), ('trim_elevator_surface_rad', 'Elevator Surface (rad)')]),
+        ('Stall warning', [('stall_aoa', 'Aircraft Angle of Attack (deg)'), ('stall_warning', 'Stall Warning (0/1)'), ('stall_elevator', 'Elevator Surface (rad)'), ('stall_pitch_position', 'BRUNNER Pitch Position (raw)')]),
+        ('Cockpit levers', [('buc_throttle', 'BUC Throttle Z Rotation (%)'), ('buc_propeller', 'BUC Propeller Slider (%)'), ('buc_mixture', 'BUC Mixture Dial (%)'), ('buc_torque', 'Engine Torque (ft lb)'), ('buc_sim_propeller', 'Propeller 1 Lever (%)'), ('buc_sim_mixture', 'Mixture 1 Position (%)')])]
     chosen = set(selected)
+    stall = reference is None and 'Stall Warning (0/1)' in measured.columns
+    if stall:
+        # Stall control graphs use device-calibrated mm and N only.
+        replacements = {}
+        for key, axis in (('pitch_position', 'Pitch'), ('roll_position', 'Roll'), ('rudder_position', 'Rudder')):
+            column = f'Joystick {axis} Position (mm)' if axis != 'Rudder' else 'Rudder Pedal Position (mm)'
+            label = f'{axis} Control Position (mm)'
+            measured[label] = _series(measured, column)
+            replacements[key] = label
+        for key, axis in (('pitch_force', 'Pitch'), ('roll_force', 'Roll'), ('rudder_force', 'Rudder')):
+            column = f'Joystick {axis} Force (N)' if axis != 'Rudder' else 'Rudder Pedal Force (N)'
+            label = f'{axis} Applied Force (N)'
+            measured[label] = _series(measured, column)
+            replacements[key] = label
+        groups = [(title, [(key, replacements.get(key, name)) for key, name in items]) for title, items in groups]
+        if 'stall_pitch_position' in chosen:
+            chosen.discard('stall_pitch_position')
+            chosen.add('pitch_position')
+    selected_items = [(key, name) for _, items in groups for key, name in items if key in chosen]
+    duration = _recorded_duration(tm)
     with PdfPages(out_path) as pdf:
+        if 0 < len(selected_items) <= 3:
+            _initial_page(pdf, 'auto' if reference is not None else 'manual', csv_path, measured, reference)
+            count = len(selected_items)
+            fig, axes = plt.subplots(count, 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
+            fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
+            for ax, (key, name) in zip(axes[:, 0], selected_items):
+                axis = {'pitch_force':'Pitch', 'roll_force':'Roll', 'rudder_force':'Yaw'}.get(key)
+                value = _automatic_virtual_force_inverted(measured, axis) if axis and reference is not None else _manual_applied_force(measured, axis) if axis and not stall else _series(measured, name)
+                if reference is None:
+                    _plot_manual(ax, tm, value, name)
+                else:
+                    ref_value = _manual_applied_force(reference, axis) if axis else _series(reference, name)
+                    _plot_auto(ax, tr, ref_value, tm, value, name)
+                _set_recorded_time(ax, duration)
+                ax.tick_params(labelsize=7)
+                ax.xaxis.label.set_size(7); ax.yaxis.label.set_size(7)
+                if not np.isfinite(np.asarray(value, dtype=float)).any():
+                    ax.text(.5, .5, 'Measurement not available', transform=ax.transAxes, ha='center', va='center', color='gray')
+            pdf.savefig(fig)
+            plt.close(fig)
+            return
         _initial_page(pdf, 'auto' if reference is not None else 'manual', csv_path, measured, reference)
         for title, items in groups:
             items = [(key, name) for key, name in items if key in chosen]
@@ -707,12 +806,13 @@ def _selected_report(csv_path, out_path, selected, manual_path=None):
             fig.suptitle('1st Quadrant Combined ' + title, fontsize=15, fontweight='bold')
             for ax, (key, name) in zip(axes[:, 0], items):
                 axis = {'pitch_force':'Pitch', 'roll_force':'Roll', 'rudder_force':'Yaw'}.get(key)
-                value = _automatic_virtual_force_inverted(measured, axis) if axis and reference is not None else _manual_applied_force(measured, axis) if axis else _series(measured, name)
+                value = _automatic_virtual_force_inverted(measured, axis) if axis and reference is not None else _manual_applied_force(measured, axis) if axis and not stall else _series(measured, name)
                 if reference is None:
                     _plot_manual(ax, tm, value, name)
                 else:
                     ref_value = _manual_applied_force(reference, axis) if axis else _series(reference, name)
                     _plot_auto(ax, tr, ref_value, tm, value, name)
+                _set_recorded_time(ax, duration)
                 if not np.isfinite(np.asarray(value, dtype=float)).any():
                     ax.text(.5, .5, 'Measurement not available', transform=ax.transAxes, ha='center', color='gray')
             pdf.savefig(fig)
@@ -876,8 +976,29 @@ def _pid_report(csv_path, out_path, validation_df=None, evaluation_result="NOT E
         groups=[(title,[(key,label) for key,label in channels if key in chosen]) for title,channels in groups]
         groups=[(title,channels) for title,channels in groups if channels]
     measured_label={'pid':'PID Automatic Test (Sim)','manual':'Manual Test (Flight)','auto':'Recorded Replay Test (Sim)'}[mode]
-    duration=max(75.,float(np.nanmax(t))) if len(t) else 75.
+    duration=_recorded_duration(t)
     with plt.rc_context({'font.family':'DejaVu Sans','axes.facecolor':'white','figure.facecolor':'white','text.color':'black','axes.labelcolor':'black','xtick.color':'black','ytick.color':'black'}),PdfPages(out_path) as pdf:
+        compact = [(key, label) for _, channels in groups for key, label in channels]
+        if selected_graphs is not None and 0 < len(compact) <= 3:
+            _initial_page(pdf, mode, csv_path, df, validation_df, evaluation_result, virtual_forces=True)
+            count = len(compact)
+            fig, axes = plt.subplots(count, 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
+            fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
+            for ax, (key, label) in zip(axes[:, 0], compact):
+                values = _series(df, key)
+                ax.plot(t, values, color='green', linewidth=1.6, label=measured_label)
+                if validation_df is not None and key in validation_df:
+                    rt = _series(validation_df, 'Time (s)')
+                    ax.plot(rt, _series(validation_df, key), color='gray', linestyle=':', label='Validation reference')
+                _style_axis(ax, label)
+                _set_recorded_time(ax, duration)
+                ax.tick_params(labelsize=7)
+                ax.xaxis.label.set_size(7); ax.yaxis.label.set_size(7)
+                if not np.isfinite(np.asarray(values, dtype=float)).any():
+                    ax.text(.5, .5, 'Measurement not available', transform=ax.transAxes, ha='center', va='center', color='gray')
+                ax.legend(loc='best', fontsize=6)
+            pdf.savefig(fig); plt.close(fig)
+            return
         _initial_page(pdf,mode,csv_path,df,validation_df,evaluation_result,virtual_forces=True)
         for title,channels in groups:
             fig,axes=plt.subplots(len(channels),1,figsize=(8.27,11.69),constrained_layout=True,squeeze=False)
@@ -901,8 +1022,7 @@ def _pid_report(csv_path, out_path, validation_df=None, evaluation_result="NOT E
                         ax.plot(rt,reference+tolerance,color='gray',linestyle='--',linewidth=.8)
                 _style_axis(ax,label)
                 if key=='Indicated Airspeed (kts)':_format_climb_airspeed_axis(ax)
-                ax.set_xlim(0,duration)
-                ax.set_xticks(np.arange(0,duration+1,5 if duration<=120 else 10))
+                _set_recorded_time(ax, duration)
                 ax.legend(loc='best',fontsize=8,framealpha=.95)
             fig.text(.99,.002,measured_label+' | '+evaluation_result,ha='right',fontsize=6)
             pdf.savefig(fig);plt.close(fig)

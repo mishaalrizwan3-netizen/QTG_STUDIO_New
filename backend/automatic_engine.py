@@ -14,6 +14,8 @@ REFERENCES = ('1.f.(1)', '1.f.(2)')
 METHOD = 'engine_step'
 # The engine test definition and existing idle recordings use 5% lever position.
 IDLE_THROTTLE = 5.0
+START_RPM_SETTLE_SECONDS = 1.5
+START_RPM_SETTLE_RANGE = 120.0
 
 
 def selected(context):
@@ -47,6 +49,13 @@ class AutomaticEngine:
         self.rows, self.outputs = [], []
         self.stable_since = None
         self.idle_reapplied = False
+        self.initial_idle_corrected = False
+        self.initialization_running = False
+        self.start_rpm_samples = []
+        from backend.parking_brake import GroundParkingBrake
+        def brake_command_unavailable():
+            raise RuntimeError('parking brake command is unavailable')
+        self.ground_brake = GroundParkingBrake(brake_command_unavailable, require_stationary=False)
         self.closed = False
         self.result = None
         self.diagnostics = {}
@@ -321,6 +330,9 @@ class AutomaticEngine:
             if not self.sim.is_connected():
                 raise RuntimeError('P3D disconnected')
             if not frame or now - frame['receipt_time'] > 1 or frame['receipt_time'] > now:
+                if self.phase == 'PREPARE' and now < self.deadline:
+                    self.details = 'Waiting for fresh engine measurements during initialization...'
+                    return
                 raise RuntimeError('Native engine telemetry stopped advancing')
             if frame['sequence'] == self.last_sequence:
                 if self.sequence:
@@ -337,46 +349,70 @@ class AutomaticEngine:
                 checks = [('alt_ft', 25), ('ias_kt', 5), ('lat', .001), ('lon', .001), ('flaps', .1),
                           ('temperature_c', 2), ('heading_deg', 3), ('pitch_deg', 3), ('bank_deg', 3)]
                 mismatches = [key for key, tolerance in checks
-                              if abs((frame[key] - self.cfg[key] + 180) % 360 - 180
+                              if not math.isfinite(frame[key]) or abs((frame[key] - self.cfg[key] + 180) % 360 - 180
                                      if key == 'heading_deg' else frame[key] - self.cfg[key]) > tolerance]
                 if bool(frame['on_ground']) != self.cfg['on_ground']:
                     mismatches.append('on_ground')
-                if self.deceleration:
-                    if frame.get('parking_brake') != 1:
+                brake_verified = not self.cfg['on_ground']
+                if self.cfg['on_ground']:
+                    brake_verified = self.ground_brake is not None and self.ground_brake.verify(frame, now)
+                    if not brake_verified:
                         mismatches.append('parking brake ON')
-                    elif frame['ground_speed'] > 3.0:
-                        mismatches.append('aircraft stationary')
+                # Positioning can reset throttle; correct it independently of weather,
+                # which may only update after simulation time advances.
+                idle_mismatch = abs(frame['throttle'] - IDLE_THROTTLE) > 2
+                if idle_mismatch and not self.initialization_running and not self.initial_idle_corrected:
+                    if not self.sim.set_initial_throttle(IDLE_THROTTLE):
+                        raise RuntimeError('Idle throttle reapplication rejected')
+                    self.initial_idle_corrected = True
+                if not self.initialization_running and not idle_mismatch and brake_verified:
+                    self.sim.unpause_sim()
+                    self.initialization_running = True
+                    self.details = 'Advancing simulator to apply initial position and weather...'
+                    return
+                if self.deceleration:
+                    if not self.initialization_running:
+                        mismatches.append('idle throttle and brake before simulator advance')
                     if abs(frame['throttle'] - IDLE_THROTTLE) > 2 and not self.idle_reapplied:
                         mismatches.append('idle throttle 5%')
                     if not mismatches and not self.idle_reapplied:
                         if not self.sim.set_initial_throttle(100.):
                             raise RuntimeError('Initial full throttle rejected')
                         self.idle_reapplied = True
-                else:
-                    idle_mismatch = abs(frame['throttle'] - IDLE_THROTTLE) > 2
-                    if idle_mismatch and not mismatches and not self.idle_reapplied:
-                        if not self.sim.set_initial_throttle(IDLE_THROTTLE):
-                            raise RuntimeError('Idle throttle reapplication rejected')
-                        self.idle_reapplied = True
                 throttle_mismatch = abs(frame['throttle'] - self.cfg['throttle']) > 2
                 if throttle_mismatch:
                     mismatches.append(f'throttle {self.cfg["throttle"]:g}% (measured {frame["throttle"]:.1f}%)')
                 if mismatches:
+                    self.start_rpm_samples.clear()
                     self.details = 'Waiting for: ' + ', '.join(mismatches)
                     if now >= self.deadline:
                         raise RuntimeError(self.details)
                     return
                 if frame['rpm'] < 300:
                     raise RuntimeError('A running engine is required; start the engine before Automatic Testing')
+                self.start_rpm_samples.append((now, frame['rpm']))
+                self.start_rpm_samples = [(stamp, rpm) for stamp, rpm in self.start_rpm_samples
+                                          if stamp >= now - 2.0]
+                settled = (len(self.start_rpm_samples) >= 3
+                           and now - self.start_rpm_samples[0][0] >= START_RPM_SETTLE_SECONDS
+                           and max(rpm for _, rpm in self.start_rpm_samples)
+                           - min(rpm for _, rpm in self.start_rpm_samples) <= START_RPM_SETTLE_RANGE)
+                if not settled:
+                    self.details = 'Waiting for engine RPM to settle before recording'
+                    if now >= self.deadline:
+                        raise RuntimeError(self.details)
+                    return
                 # Initial conditions verified. Pause P3D and declare READY TO RECORD.
                 self.sim.pause_sim()
+                if not self.sim.wait_for_paused(3.0):
+                    raise RuntimeError('Simulator did not confirm pause after initialization')
                 self.phase, self.stage = 'READY', 'READY TO RECORD'
                 self.details = 'Click Start Recording: 5 seconds baseline, throttle step, then 3 seconds stable RPM'
                 return
             if self.phase == 'READY':
-                if self.deceleration:
-                    if frame.get('parking_brake') != 1 or frame.get('ground_speed', 0) > 3.0:
-                        raise RuntimeError('Parking brake engagement lost or aircraft moving')
+                if self.cfg['on_ground']:
+                    if frame.get('parking_brake') != 1:
+                        raise RuntimeError('Parking brake engagement lost')
                 if abs(frame['throttle'] - self.cfg['throttle']) > 2:
                     raise RuntimeError('Starting throttle changed; initialize again')
                 return
@@ -386,9 +422,9 @@ class AutomaticEngine:
                     self.last_sim_time = frame['sim_time']
                 elif self.sim_advanced_at is not None and now - self.sim_advanced_at > 1.5:
                     raise RuntimeError('Simulator paused or simulation time stopped advancing')
-                if self.deceleration:
-                    if frame.get('parking_brake') != 1 or frame.get('ground_speed', 0) > 3.0:
-                        raise RuntimeError('Parking brake engagement lost or aircraft moving')
+                if self.cfg['on_ground']:
+                    if frame.get('parking_brake') != 1:
+                        raise RuntimeError('Parking brake engagement lost')
 
                 sim_tel = self.sim.get_telemetry() if hasattr(self.sim, 'get_telemetry') else {}
                 prop_rpm = frame.get('prop_rpm')
@@ -547,6 +583,8 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
             dll = next((p for p in dll_candidates if p.is_file()), dll_candidates[0])
             reader_factory = lambda: Measurements(dll)
         reader = reader_factory()
+        from backend.parking_brake import GroundParkingBrake
+        controller.ground_brake = GroundParkingBrake(reader.engage_parking_brake, require_stationary=False)
         directory = Path(context['command_directory'])
         while not controller.closed:
             commands = []
@@ -564,8 +602,13 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
             else:
                 for command in commands:
                     controller.command(command)
-            if not controller.closed:
+            if not controller.closed and controller.phase != 'DONE':
+                previous_phase = controller.phase
                 controller.step(reader.poll())
+                if previous_phase == 'CONNECT' and controller.phase == 'PREPARE' and hasattr(reader, 'discard_pending'):
+                    reader.discard_pending()
+                sleep(.04)
+            elif not controller.closed:
                 sleep(.04)
         return 0
     except Exception as exc:

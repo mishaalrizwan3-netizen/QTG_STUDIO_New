@@ -27,16 +27,20 @@ import pandas as pd
 from backend.control_profile import AXIS_INFO, STATIC_CONTROL_REFERENCES
 
 # Import official climb report cover page and style helpers
-from interfaces.brunner_base.src.plot_graphs import _initial_page, _style_axis, _series
+from interfaces.brunner_base.src.plot_graphs import _initial_page, _style_axis, _series, _recorded_duration, _set_recorded_time
 
 
 DEFAULT_SELECTED_BY_REF = {
     '2.a.(1)': ['ias_kt', 'pitch_position', 'pitch_force'],
     '2.a.(2)': ['ias_kt', 'roll_position', 'roll_force'],
     '2.a.(3)': ['ias_kt', 'rudder_position', 'rudder_force'],
+    '2.c.(8b)': ['ias_kt', 'stall_warning', 'stall_aoa', 'pitch_deg', 'bank_deg', 'pitch_position'],
 }
 
 CHANNEL_CONFIG = {
+    'stall_warning': {'col':'Stall Warning (0/1)', 'alt_cols':['Stall Warning (0/1)'], 'label':'Stall Warning (0/1)', 'group':'Stall Warning'},
+    'stall_aoa': {'col':'Aircraft Angle of Attack (deg)', 'alt_cols':['Aircraft Angle of Attack (deg)'], 'label':'Aircraft Angle of Attack (deg)', 'group':'Stall Warning'},
+    'stall_elevator': {'col':'Elevator Surface (rad)', 'alt_cols':['Elevator Surface (rad)'], 'label':'Elevator Surface (rad)', 'group':'Stall Warning'},
     'ias_kt': {
         'col': 'Indicated Airspeed (kts)',
         'alt_cols': ['Indicated Airspeed (kts)', 'airspeed_indicated'],
@@ -187,6 +191,17 @@ CHANNEL_CONFIG = {
 }
 
 
+CHANNEL_CONFIG.update({
+    key: {'col': column, 'alt_cols': [column], 'label': column, 'group': 'Pitch trim'}
+    for key, column in (
+        ('trim_position_rad', 'Elevator Trim Angle (rad)'),
+        ('trim_indicator', 'Elevator Trim Indicator (position)'),
+        ('trim_value_pct', 'Elevator Trim (%)'),
+        ('trim_elevator_surface_rad', 'Elevator Surface (rad)'),
+    )
+})
+
+
 def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reason: str) -> List[str]:
     """Saves CSV, metadata JSON and renders the climb-style PDF report."""
     test_ref = context.get('test_reference', '')
@@ -219,17 +234,19 @@ def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reaso
         outputs.append(str(csv_path))
 
     # 2. Write Metadata
+    is_trim = test_ref == '2.a.(4)'
+    is_stall = test_ref == '2.c.(8b)'
     metadata = dict(
         context,
         result=result,
         reason=reason,
         status='complete' if result == 'COMPLETE' else result.lower(),
         mode='auto',
-        control_method='static_control',
+        control_method='stall' if is_stall else 'pitch_trim' if is_trim else 'static_control',
         axis_name=axis_name,
         samples=len(rows),
-        measurement_source='BRUNNER CLS2Sim UDP load-cell force & position; P3D SimConnect',
-        validation='Static position vs force characteristic verification',
+        measurement_source=('CLS2Sim trim button actions; P3D SimConnect' if is_trim else 'BRUNNER CLS2Sim UDP load-cell force & position; P3D SimConnect'),
+        validation=('Stall warning cycle; no automatic grading' if is_stall else 'Pitch trim sweep; no automatic grading' if is_trim else 'Static position vs force characteristic verification'),
     )
     metadata_path.write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding='utf-8')
     outputs.append(str(metadata_path))
@@ -241,6 +258,21 @@ def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reaso
     return outputs
 
 
+def _build_reference_df(context: Dict[str, Any], sim_df: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Load a real comparison file when one was selected by the operator."""
+    for key in ('reference_csv', 'validation_csv'):
+        ref_path = context.get(key)
+        if ref_path and Path(ref_path).is_file():
+            try:
+                loaded = pd.read_csv(ref_path)
+                if not loaded.empty:
+                    return loaded
+            except Exception:
+                pass
+
+    return None
+
+
 def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str, Any], rows: List[Dict[str, Any]]):
     """Renders official QTG report matching the climb test format with selected graphs in BLUE."""
     test_ref = context.get('test_reference', '2.a.(1)')
@@ -249,8 +281,9 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
         selected = DEFAULT_SELECTED_BY_REF.get(test_ref, ['ias_kt', 'pitch_position', 'pitch_force'])
 
     df = pd.DataFrame(rows) if rows else pd.read_csv(csv_path)
+    ref_df = _build_reference_df(context, df)
     tm = _series(df, 'Time (s)')
-    t_max = max(15.0, float(np.nanmax(tm))) if len(tm) > 0 and np.isfinite(np.nanmax(tm)) else 15.0
+    t_max = _recorded_duration(tm)
 
     # Determine which items are requested
     chosen_items = []
@@ -267,7 +300,8 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
                         break
             if series is None:
                 series = _series(df, cfg['col'])
-            chosen_items.append((cfg['label'], series, cfg['group']))
+            label = 'Pitch Applied Force (N)' if test_ref == '2.c.(8b)' and key == 'pitch_force' else cfg['label']
+            chosen_items.append((label, series, cfg['group']))
 
     with plt.rc_context({
         'font.family': 'DejaVu Sans',
@@ -280,7 +314,24 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
     }), PdfPages(str(out_path)) as pdf:
 
         # Page 1: Standard Super Mushshak QTG Cover Page
-        _initial_page(pdf, 'auto', str(csv_path), df, None, virtual_forces=True, missing_label='N/A')
+        if 0 < len(chosen_items) <= 3:
+            _initial_page(pdf, 'auto', str(csv_path), df, ref_df, virtual_forces=ref_df is not None and test_ref != '2.c.(8b)', missing_label='N/A')
+            count = len(chosen_items)
+            fig, axes = plt.subplots(count, 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
+            fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
+            for ax, (label, values, _) in zip(axes[:, 0], chosen_items):
+                ax.plot(tm, values, color='#0066cc', linewidth=1.6, label='Automatic Test (Sim)')
+                _style_axis(ax, label)
+                _set_recorded_time(ax, t_max)
+                ax.tick_params(labelsize=7)
+                ax.xaxis.label.set_size(7); ax.yaxis.label.set_size(7)
+                if not np.isfinite(np.asarray(values, dtype=float)).any():
+                    ax.text(.5, .5, 'Measurement not available', transform=ax.transAxes, ha='center', va='center', color='gray')
+                ax.legend(loc='best', fontsize=6)
+            pdf.savefig(fig)
+            plt.close(fig)
+            return
+        _initial_page(pdf, 'auto', str(csv_path), df, ref_df, virtual_forces=ref_df is not None and test_ref != '2.c.(8b)', missing_label='N/A')
 
         # Page 2+: Selected Graphs
         if not chosen_items:
@@ -301,8 +352,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
                 if not np.isfinite(np.asarray(values, dtype=float)).any():
                     ax.text(0.5, 0.5, 'Measurement not available', transform=ax.transAxes, ha='center', color='gray')
                 _style_axis(ax, label)
-                ax.set_xlim(0, t_max)
-                ax.set_xticks(np.arange(0, t_max + 1, 5 if t_max <= 60 else 10))
+                _set_recorded_time(ax, t_max)
                 ax.legend(loc='best', fontsize=8, framealpha=0.95)
             pdf.savefig(fig)
             plt.close(fig)
@@ -320,8 +370,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
                     if not np.isfinite(np.asarray(values, dtype=float)).any():
                         ax.text(0.5, 0.5, 'Measurement not available', transform=ax.transAxes, ha='center', color='gray')
                     _style_axis(ax, label)
-                    ax.set_xlim(0, t_max)
-                    ax.set_xticks(np.arange(0, t_max + 1, 5 if t_max <= 60 else 10))
+                    _set_recorded_time(ax, t_max)
                     ax.legend(loc='best', fontsize=8, framealpha=0.95)
                 pdf.savefig(fig)
                 plt.close(fig)

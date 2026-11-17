@@ -1520,6 +1520,31 @@ class SuperMushakLoggerApp(QMainWindow):
             self.brunner.release_controls()
             self.sig_update_stage.emit(STAGE_CONNECTION_ERROR, str(exc))
             return
+        stall_reader = None
+        is_stall = getattr(self, '_session_context', {}).get('test_reference') == '2.c.(8b)'
+        is_buc = getattr(self, '_session_context', {}).get('test_reference') == '2.a.(8)'
+        buc_reader = None
+        if is_buc:
+            self._buc_measurement_error = None
+            try:
+                from backend.bu0836x import Reader
+                buc_reader = Reader()
+            except Exception as exc:
+                self.is_recording = False
+                self.sig_update_stage.emit(STAGE_CONNECTION_ERROR, 'BU0836X unavailable: ' + str(exc))
+                return
+        if is_stall:
+            self._stall_measurement_error = None
+            try:
+                from interfaces.engine_measurements import Measurements
+                from backend.stall_measurements import CHANNELS
+                root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]
+                stall_reader = Measurements(root / 'bridge/bin/qtg_simconnect.dll', channels=CHANNELS)
+            except Exception as exc:
+                self.is_recording = False
+                self.brunner.release_controls()
+                self.sig_update_stage.emit(STAGE_CONNECTION_ERROR, 'Stall measurements unavailable: ' + str(exc))
+                return
         # Capture the sequence on every path before checking for a fresh packet.
         initial_sequence = self.p3d.get_telemetry_sequence() if self.p3d else -1
         # Unpause P3D in exact lockstep at t=0
@@ -1531,6 +1556,15 @@ class SuperMushakLoggerApp(QMainWindow):
         _observe_brake_recording_clock(self, t0)
         next_tick = 0.0
         sec_counter = 0
+        trim_indicator_reader = None
+        if getattr(self, '_session_context', {}).get('test_reference') == '2.a.(4)':
+            try:
+                from interfaces.engine_measurements import Measurements
+                root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]
+                trim_indicator_reader = Measurements(root / 'bridge/bin/qtg_simconnect.dll',
+                    channels=(('indicator', 'ELEVATOR TRIM INDICATOR', 'position'),))
+            except Exception as exc:
+                print(f'[Pitch trim] Indicator unavailable: {exc}', flush=True)
 
         while not self.stop_worker_event.is_set():
             now = time.perf_counter() - t0
@@ -1548,6 +1582,12 @@ class SuperMushakLoggerApp(QMainWindow):
             if not self.rec_time and self.p3d:
                 fresh = self.p3d.wait_for_fresh_telemetry(initial_sequence, 2.0)
                 if fresh is None:
+                    if buc_reader is not None:
+                        buc_reader.close()
+                    if stall_reader is not None:
+                        stall_reader.close()
+                    if trim_indicator_reader is not None:
+                        trim_indicator_reader.close()
                     self.p3d.pause_sim()
                     self.brunner.release_controls()
                     self.is_recording = False
@@ -1557,12 +1597,66 @@ class SuperMushakLoggerApp(QMainWindow):
                 try:
                     verify_recording_sample(self, tele)
                 except Exception as exc:
+                    if buc_reader is not None:
+                        buc_reader.close()
+                    if stall_reader is not None:
+                        stall_reader.close()
+                    if trim_indicator_reader is not None:
+                        trim_indicator_reader.close()
                     self.p3d.pause_sim()
                     self.brunner.release_controls()
                     self.is_recording = False
                     self.sig_update_stage.emit(STAGE_CONNECTION_ERROR, str(exc))
                     return
                 now = time.perf_counter() - t0
+            if trim_indicator_reader is not None:
+                try:
+                    sample = trim_indicator_reader.poll()
+                    tele = dict(tele)
+                    if sample and 0 <= time.monotonic() - sample['receipt_time'] <= 0.5:
+                        tele['trim_elevator_indicator'] = sample.get('indicator')
+                except Exception as exc:
+                    print(f'[Pitch trim] Indicator unavailable: {exc}', flush=True)
+                    trim_indicator_reader.close()
+                    trim_indicator_reader = None
+            if is_stall:
+                from backend.stall_measurements import telemetry_fields
+                try:
+                    sample = stall_reader.poll() if stall_reader is not None else None
+                    if not self.rec_time:
+                        deadline = time.monotonic() + 2.0
+                        while sample is None and time.monotonic() < deadline and not self.stop_worker_event.is_set():
+                            time.sleep(.01)
+                            sample = stall_reader.poll()
+                        first = telemetry_fields(sample, time.monotonic())
+                        if not math.isfinite(first['stall_warning']) or not math.isfinite(first['airspeed_indicated']):
+                            raise RuntimeError('No fresh stall warning and airspeed readback')
+                except Exception as exc:
+                    print(f'[Stall warning] Measurement unavailable: {exc}', flush=True)
+                    if stall_reader is not None:
+                        stall_reader.close()
+                    stall_reader = None
+                    self._stall_measurement_error = str(exc)
+                    break
+                tele = dict(tele)
+                tele.update(telemetry_fields(sample, time.monotonic()))
+            if is_buc:
+                try:
+                    sample = buc_reader.poll()
+                    if not self.rec_time:
+                        deadline = time.monotonic() + 2.
+                        while sample is None and time.monotonic() < deadline and not self.stop_worker_event.is_set():
+                            time.sleep(.01)
+                            sample = buc_reader.poll()
+                    if sample is None:
+                        raise RuntimeError('No BU0836X axis report received')
+                    tele = dict(tele)
+                    tele['buc_sample'] = sample
+                    tele['buc_sample_age_s'] = max(0., time.monotonic() - sample['receipt_time'])
+                    self._buc_latest = dict(sample)
+                except Exception as exc:
+                    self._buc_measurement_error = str(exc)
+                    break
             now = time.perf_counter() - t0
             self.rec_time.append(now)
             self.p_pos_buf.append(pp); self.p_force_buf.append(pf)
@@ -1602,6 +1696,12 @@ class SuperMushakLoggerApp(QMainWindow):
             if dt > 0:
                 time.sleep(dt)
 
+        if stall_reader is not None:
+            stall_reader.close()
+        if buc_reader is not None:
+            buc_reader.close()
+        if trim_indicator_reader is not None:
+            trim_indicator_reader.close()
         # Immediately pause Prepar3D simulation lockstep with finish
         if self.p3d:
             try:
@@ -1609,6 +1709,18 @@ class SuperMushakLoggerApp(QMainWindow):
                 print("[FINISH] Manual recording completed -> Prepar3D simulation PAUSED immediately.", flush=True)
             except Exception:
                 pass
+
+        if is_stall and not self.rec_time:
+            self.is_recording = False
+            self.brunner.release_controls()
+            self.sig_update_stage.emit(STAGE_CONNECTION_ERROR,
+                'Stall recording did not start: ' + (self._stall_measurement_error or 'stopped by operator'))
+            return
+        if is_buc and not self.rec_time:
+            self.is_recording = False
+            self.sig_update_stage.emit(STAGE_CONNECTION_ERROR,
+                'Throttle alignment recording did not start: ' + (self._buc_measurement_error or 'stopped by operator'))
+            return
 
         self.sig_recording_finished.emit()
 
@@ -1927,6 +2039,22 @@ class SuperMushakLoggerApp(QMainWindow):
                 f"Throttle_{prefix.capitalize()}"
             ]
 
+            is_pitch_trim = getattr(self, '_session_context', {}).get('test_reference') == '2.a.(4)'
+            is_stall = getattr(self, '_session_context', {}).get('test_reference') == '2.c.(8b)'
+            is_buc = getattr(self, '_session_context', {}).get('test_reference') == '2.a.(8)'
+            if is_pitch_trim:
+                fieldnames.append('Elevator Trim Indicator (position)')
+            if is_stall:
+                fieldnames.extend(['Stall Warning (0/1)', 'BRUNNER Pitch Position (raw)',
+                    'BRUNNER Roll Position (raw)', 'BRUNNER Rudder Position (raw)',
+                    'CG Longitudinal (% reference chord)', 'CG Lateral (% reference chord)',
+                    'BRUNNER Pitch Applied Force', 'BRUNNER Pitch Applied Force Unit',
+                    'BRUNNER Roll Applied Force', 'BRUNNER Roll Applied Force Unit',
+                    'BRUNNER Rudder Applied Force', 'BRUNNER Rudder Applied Force Unit'])
+            if is_buc:
+                fieldnames.extend(['BUC Throttle Z Rotation (%)', 'BUC Throttle Demand (%)',
+                    'BUC Propeller Slider (%)', 'BUC Mixture Dial (%)', 'BUC Throttle Raw',
+                    'BUC Propeller Raw', 'BUC Mixture Raw', 'BUC Sample Age (s)'])
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
@@ -2048,6 +2176,69 @@ class SuperMushakLoggerApp(QMainWindow):
                         f"Engine_RPM_{prefix.capitalize()}": round(float(rpm), 0),
                         f"Throttle_{prefix.capitalize()}": round(float(throt), 1),
                     }
+                    if is_pitch_trim:
+                        row_dict['Elevator Trim Indicator (position)'] = tel.get('trim_elevator_indicator', float('nan'))
+                    if is_buc:
+                        sample = tel.get('buc_sample', {})
+                        for column, key in (('BUC Throttle Z Rotation (%)','throttle_pct'),
+                                ('BUC Throttle Demand (%)','throttle_demand_pct'), ('BUC Propeller Slider (%)','propeller_pct'),
+                                ('BUC Mixture Dial (%)','mixture_pct'), ('BUC Throttle Raw','throttle_raw'),
+                                ('BUC Propeller Raw','propeller_raw'), ('BUC Mixture Raw','mixture_raw')):
+                            row_dict[column] = sample.get(key, float('nan'))
+                        row_dict['BUC Sample Age (s)'] = tel.get('buc_sample_age_s', float('nan'))
+                    if is_stall:
+                        row_dict['Stall Warning (0/1)'] = tel.get('stall_warning', float('nan'))
+                        row_dict['BRUNNER Pitch Position (raw)'] = p_pos
+                        row_dict['BRUNNER Roll Position (raw)'] = r_pos
+                        row_dict['BRUNNER Rudder Position (raw)'] = y_pos
+                        row_dict['CG Longitudinal (% reference chord)'] = tel.get('stall_cg_long_pct', float('nan'))
+                        row_dict['CG Lateral (% reference chord)'] = tel.get('stall_cg_lateral_pct', float('nan'))
+                        units = tel.get('stall_force_units', ('', '', ''))
+                        for axis, force, unit in zip(('Pitch', 'Roll', 'Rudder'), (p_frc, r_frc, y_frc), units):
+                            row_dict[f'BRUNNER {axis} Applied Force'] = force
+                            row_dict[f'BRUNNER {axis} Applied Force Unit'] = unit
+                        for key in ('Joystick Pitch Force (N)', 'Joystick Roll Force (N)',
+                                    'Rudder Pedal Force (N)', 'Pitch_Manual_Force',
+                                    'Roll_Manual_Force', 'Rudder_Manual_Force',
+                                    'Pitch Virtual Force 0x51 (N)', 'Roll Virtual Force 0x51 (N)',
+                                    'Yaw Virtual Force 0x51 (N)', 'Pitch Virtual Force (N)',
+                                    'Roll Virtual Force (N)', 'Yaw Virtual Force (N)',
+                                    'Joystick Pitch Position (mm)', 'Joystick Roll Position (mm)',
+                                    'Rudder Pedal Position (mm)'):
+                            row_dict[key] = float('nan')
+                        for key, source in (('Gross Wt (kg)', 'total_weight'),
+                                ('Total Fuel Quantity (kg)', 'total_fuel_quantity'),
+                                ('Baro Press (hPa)', 'baro_pressure'), ('OAT (deg C)', 'ambient_temp'),
+                                ('Wind Dir (mag,deg)', 'ambient_wind_dir'), ('Wind Spd (kt)', 'ambient_wind_spd'),
+                                ('EGT (deg C)', 'egt'),
+                                ('Mach Number (-)', 'mach_number'), ('Radar Alt (ft)', 'radar_alt'),
+                                ('Sideslip Angle (deg)', 'sideslip'), ('Track Angle (deg)', 'track_angle')):
+                            row_dict[key] = tel.get(source, float('nan'))
+                        row_dict['CG Pos in X Axis (mm)'] = float('nan')
+                        row_dict['CG Pos in Y Axis (mm)'] = float('nan')
+                        row_dict['Height of Terrain (ft)'] = tel.get('stall_ground_alt', float('nan'))
+                        row_dict['Fuel Flow (pph)'] = tel.get('stall_fuel_flow_pph', float('nan'))
+                        # Native bridge requests these three values in feet/s².
+                        for axis in 'XYZ':
+                            value = tel.get('accel' + axis, float('nan'))
+                            try:
+                                row_dict[f'{axis} Body Acceleration (g)'] = float(value) / 32.1740485564
+                            except (TypeError, ValueError):
+                                row_dict[f'{axis} Body Acceleration (g)'] = float('nan')
+                        # Use exactly the same position and applied-force conversions as Climb Manual.
+                        for position_key, force_key, pos, force in (
+                                ('Joystick Pitch Position (mm)', 'Joystick Pitch Force (N)', p_pos, p_app),
+                                ('Joystick Roll Position (mm)', 'Joystick Roll Force (N)', r_pos, r_app),
+                                ('Rudder Pedal Position (mm)', 'Rudder Pedal Force (N)', y_pos, y_app)):
+                            row_dict[position_key] = round(float(pos) * 100.0, 2)
+                            row_dict[force_key] = round(float(force), 3)
+                        for key, source in (('Indicated Altitude (ft)', 'indicated_altitude'),
+                                ('Rate of Climb/Descent (fpm)', 'vertical_speed'),
+                                ('Magnetic Heading (deg)', 'magnetic_heading'),
+                                ('Pitch Rate (deg/s)', 'pitch_rate'), ('Roll Rate (deg/s)', 'roll_rate'),
+                                ('Yaw Rate (deg/s)', 'yaw_rate'), ('Engine 1 RPM', 'engine_rpm'),
+                                ('Ground Speed (kt)', 'ground_speed')):
+                            row_dict[key] = tel.get(source, float('nan'))
                     writer.writerow(row_dict)
 
             print(f"[OK] CSV saved successfully with full QTG columns: {len(self.rec_time)} rows.")

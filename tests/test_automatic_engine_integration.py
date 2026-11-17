@@ -65,6 +65,8 @@ class EngineIntegrationTests(unittest.TestCase):
         worker.step(self.frame(worker, throttle=5))
         self.now += 1
         worker.step(self.frame(worker, throttle=5))
+        self.now += 1
+        worker.step(self.frame(worker, throttle=5))
         for _ in range(5):
             self.now += 1
             worker.step(self.frame(worker))
@@ -117,6 +119,42 @@ class EngineIntegrationTests(unittest.TestCase):
             self.assertEqual(worker.stage, 'FAILED')
             self.assertNotIn(unittest.mock.call(100.), self.sim.set_initial_throttle.call_args_list)
             self.assertIn('parking brake', worker.details)
+
+    def test_deceleration_engages_brake_and_waits_for_fresh_on_before_full_throttle(self):
+        from backend.parking_brake import GroundParkingBrake
+        send = Mock()
+        worker = self.worker(True)
+        worker.ground_brake = GroundParkingBrake(send)
+        worker.step(self.frame(worker, throttle=5, brake=0))
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, brake=0))
+        send.assert_called_once_with()
+        self.assertNotIn(unittest.mock.call(100.), self.sim.set_initial_throttle.call_args_list)
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, brake=1))
+        self.assertNotIn(unittest.mock.call(100.), self.sim.set_initial_throttle.call_args_list)
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, brake=1))
+        self.sim.set_initial_throttle.assert_any_call(100.)
+
+    def test_deceleration_continues_recording_with_ground_movement(self):
+        worker = self.worker(True)
+        self.ready(worker)
+        worker.command(dict(action='record'))
+        self.now += 1
+        worker.step(self.frame(worker, brake=1, ground_speed=8.))
+        self.assertEqual(worker.phase, 'RECORD')
+        self.assertEqual(worker.rows[-1]['Ground Speed (kt)'], 8.)
+
+    def test_ground_movement_does_not_block_verified_parking_brake(self):
+        worker = self.worker(True)
+        worker.step(self.frame(worker, throttle=5, brake=1, ground_speed=4.))
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, brake=1, ground_speed=4.))
+        self.sim.unpause_sim.assert_called_once()
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, brake=1, ground_speed=4.))
+        self.sim.set_initial_throttle.assert_any_call(100.)
 
     def test_brake_loss_while_ready_or_recording_removes_power(self):
         for record in (False, True):
@@ -197,11 +235,20 @@ class EngineIntegrationTests(unittest.TestCase):
         self.sim.unpause_sim.assert_not_called()
         self.now += .1
         worker.step(self.frame(worker, throttle=5))
+        self.assertEqual(worker.phase, 'PREPARE')
+        self.sim.unpause_sim.assert_called_once()
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5))
+        self.assertEqual(worker.phase, 'PREPARE')
+        self.assertIn('RPM to settle', worker.details)
+        self.now += .75
+        worker.step(self.frame(worker, throttle=5))
+        self.now += .8
+        worker.step(self.frame(worker, throttle=5))
         self.assertEqual(worker.phase, 'READY')
         self.assertEqual(worker.stage, 'READY TO RECORD')
-        self.sim.unpause_sim.assert_not_called()
         worker.command(dict(action='record'))
-        self.sim.unpause_sim.assert_called_once()
+        self.assertEqual(self.sim.unpause_sim.call_count, 2)
 
     def test_persistent_nonidle_readback_blocks_recording(self):
         worker = self.worker()
@@ -213,6 +260,55 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertEqual(worker.stage, 'FAILED')
         self.assertIn('throttle 5%', worker.details)
         self.sim.unpause_sim.assert_not_called()
+
+    def test_initialization_waits_for_fresh_measurement_after_blocking_call(self):
+        worker = self.worker()
+        worker.step(self.frame(worker, throttle=5))
+        self.now = 2.
+        worker.step(None)
+        self.assertEqual(worker.phase, 'PREPARE')
+        self.assertIn('fresh engine measurements', worker.details)
+        self.now = 16.
+        worker.step(None)
+        self.assertEqual(worker.stage, 'FAILED')
+
+    def test_throttle_correction_and_unpause_do_not_wait_for_temperature(self):
+        worker = self.worker()
+        worker.step(self.frame(worker, throttle=5))
+        self.now += .1
+        worker.step(self.frame(worker, throttle=90, temperature_c=30))
+        self.sim.set_initial_throttle.assert_called_with(5.)
+        self.sim.unpause_sim.assert_not_called()
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, temperature_c=30))
+        self.sim.unpause_sim.assert_called_once()
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, temperature_c=30))
+        self.assertEqual(worker.phase, 'PREPARE')
+        self.assertIn('temperature_c', worker.details)
+        self.now += .1
+        worker.step(self.frame(worker, throttle=5, temperature_c=15))
+        self.assertEqual(worker.phase, 'PREPARE')
+        self.now += .75
+        worker.step(self.frame(worker, throttle=5, temperature_c=15))
+        self.now += .8
+        worker.step(self.frame(worker, throttle=5, temperature_c=15))
+        self.assertEqual(worker.phase, 'READY')
+
+    def test_waits_for_engine_rpm_to_settle_before_recording(self):
+        worker = self.worker()
+        worker.step(self.frame(worker, throttle=5, rpm=2700))
+        self.now = 1.
+        worker.step(self.frame(worker, throttle=5, rpm=2700))
+        for stamp, rpm in ((2., 2700.), (2.5, 2000.), (3., 1500.),
+                           (4., 1540.)):
+            self.now = stamp
+            worker.step(self.frame(worker, throttle=5, rpm=rpm))
+            self.assertEqual(worker.phase, 'PREPARE')
+        self.now = 5.
+        worker.step(self.frame(worker, throttle=5, rpm=1550.))
+        self.assertEqual(worker.stage, 'READY TO RECORD')
+        self.sim.pause_sim.assert_called()
 
     def test_deceleration_never_issues_full_throttle_without_brake_after_idle_reapply(self):
         worker = self.worker(True)
@@ -257,7 +353,7 @@ class EngineIntegrationTests(unittest.TestCase):
         self.ready(worker)  # gets to READY TO RECORD
         worker.command(dict(action='record'))
         self.assertEqual(worker.phase, 'RECORD')
-        self.sim.unpause_sim.assert_called_once()
+        self.assertEqual(self.sim.unpause_sim.call_count, 2)
         worker.step(self.frame(worker))
         # Advance clock by 2s without advancing sim_time
         self.now += 2.0
@@ -291,6 +387,29 @@ class EngineIntegrationTests(unittest.TestCase):
         reader.close.assert_called_once()
         self.sim.stop.assert_called_once()
         thread.return_value.join.assert_called_once()
+
+    def test_finished_worker_does_not_poll_stale_reader(self):
+        context = self.context()
+        directory = Path(context['command_directory'])
+        directory.mkdir()
+        reader = Mock()
+        controller = Mock()
+        controller.closed = False
+        controller.phase = 'CONNECT'
+        def step(_frame):
+            controller.phase = 'DONE'
+        def command(_command):
+            controller.closed = True
+        controller.step.side_effect = step
+        controller.command.side_effect = command
+        def sleep(_seconds):
+            (directory / 'shutdown.json').write_text(json.dumps({'action':'shutdown'}))
+        with patch('backend.automatic_engine.threading.Thread'), \
+             patch('backend.automatic_engine.AutomaticEngine', return_value=controller):
+            result = run(context, self.published.append, factory=lambda: self.sim,
+                         reader_factory=lambda: reader, sleep=sleep)
+        self.assertEqual(result, 0)
+        reader.poll.assert_called_once()
 
     def test_worker_startup_failure_cleans_owned_transport(self):
         with patch('backend.automatic_engine.threading.Thread'):
@@ -371,7 +490,38 @@ class MeasurementProtocolTests(unittest.TestCase):
         reader._receive(C.addressof(packet), len(packet), None)
         self.assertEqual(reader.sequence, 0)
         self.assertIsNone(reader.object_id)
-        self.assertIn('delayed', reader.error)
+        self.assertIsNone(reader.pending)
+        self.assertEqual(reader.error, '')
+
+    def test_expired_request_is_replaced_and_fresh_response_is_accepted(self):
+        reader = self.reader()
+        now = [12.]
+        reader.clock = lambda: now[0]
+        reader.requested_at = 10.
+        reader.request_counter = 100
+        reader.latest = {'receipt_time': 10.}
+        reader.handle = C.c_void_p(1)
+        reader.callback = None
+        reader.dll = SimpleNamespace(
+            SimConnect_CallDispatch=lambda *_: 0,
+            SimConnect_RequestDataOnSimObject=lambda *_: 0)
+        self.assertIsNone(reader.poll())
+        self.assertEqual(reader.pending, 101)
+        self.assertEqual(reader.requested_at, 12.)
+        now[0] = 12.1
+        packet = self.packet(request=101)
+        reader._receive(C.addressof(packet), len(packet), None)
+        self.assertEqual(reader.sequence, 1)
+        self.assertEqual(reader.latest['receipt_time'], 12.1)
+
+    def test_discarded_initialization_response_cannot_refresh_measurements(self):
+        reader = self.reader()
+        reader.discard_pending()
+        packet = self.packet()
+        reader._receive(C.addressof(packet), len(packet), None)
+        self.assertEqual(reader.sequence, 0)
+        self.assertIsNone(reader.latest)
+        self.assertEqual(reader.error, '')
 
 
 class GuiWiringTests(unittest.TestCase):

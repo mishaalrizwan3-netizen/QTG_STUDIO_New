@@ -166,6 +166,8 @@ def load_base():
                 import pandas as pd
                 import numpy as np
                 df = orig_rc(path)
+                if 'Stall Warning (0/1)' in df.columns:
+                    return df
                 rpm_col = next((c for c in ("Engine 1 RPM", "engine_rpm", "Engine RPM") if c in df.columns), None)
                 if rpm_col:
                     rpm_arr = pd.to_numeric(df[rpm_col], errors="coerce").to_numpy()
@@ -223,6 +225,8 @@ def load_base():
                 import pandas as pd
                 import numpy as np
                 val = orig_s(df, key)
+                if 'Stall Warning (0/1)' in df.columns:
+                    return val
                 if key in ("Fuel Flow (pph)", "fuel_flow_pph"):
                     fin = val[np.isfinite(val)]
                     if len(fin) == 0 or np.max(np.abs(fin)) <= 0.05:
@@ -283,6 +287,10 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
     if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
     if control_method == 'engine_step' and mode != 'auto':
         raise ValueError('Engine throttle step requires Automatic Testing')
+    if control_method == 'pitch_trim' and mode != 'auto':
+        raise ValueError('Pitch trim button sweep requires Automatic Testing')
+    if control_method == 'stall' and mode != 'auto':
+        raise ValueError('Stall control requires Automatic Testing')
     policy=engine_test_policy(spec.reference)
     duration_s=validate_duration(policy.DURATION_SECONDS if policy else (75 if duration_s is None else duration_s))
     if control_method == 'engine_step':
@@ -297,13 +305,15 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
         initial_conditions = resolve_initial_conditions(initial_condition_overrides)
     else:
         initial_conditions=validate_conditions(initial_conditions)
+    if spec.reference == '2.a.(8)' and (mode != 'manual' or not initial_conditions.get('on_ground') or initial_conditions.get('ias_kt') != 0):
+        raise ValueError('Throttle lever alignment requires Manual mode, Ground and zero IAS.')
     if spec.reference in ('1.f.(1)', '1.f.(2)') and (mode == 'manual' or control_method == 'engine_step'):
         from backend.engine_conditions import enforce
         initial_conditions = enforce(spec.reference, initial_conditions)
     brunner_root()
     validate_method(spec.reference, control_method)
     from backend.engine_initialization_adapter import requested
-    universal_auto = mode == 'auto' and control_method != 'engine_step' and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
+    universal_auto = mode == 'auto' and control_method not in ('engine_step', 'pitch_trim', 'stall') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
     if mode=='auto' and (control_method=='replay' or universal_auto):
         if not reference:
             raise ValueError('Select a Manual reference CSV before Universal Automatic initialization; GUI targets cannot substitute.')
@@ -524,6 +534,11 @@ def worker_class(base,context,publish):
 
         def _publish(self):
             status = snapshot(self,context)
+            if context.get('test_reference') == '2.a.(8)':
+                buc = getattr(self, '_buc_latest', None)
+                if buc:
+                    status['controls_text'] = (f"BUC throttle axis: {buc['throttle_pct']:.1f}% (full=0) | "
+                        f"Propeller: {buc['propeller_pct']:.1f}% | Mixture: {buc['mixture_pct']:.1f}%")
             from backend.engine_initialization_adapter import initialization_only
             if initialization_only(self):
                 status['can_record'] = False
@@ -1004,7 +1019,7 @@ def worker_class(base,context,publish):
         def _save_csv_and_generate_reports(self):
             # Engine tests: guard the recorded mode and strip any previous
             # replay reference from Manual report generation.
-            if context.get('test_reference') in ('1.f.(1)', '1.f.(2)'):
+            if context.get('test_reference') in ('1.f.(1)', '1.f.(2)', '2.c.(8b)'):
                 if self.test_mode != context.get('mode'):
                     raise RuntimeError(
                         'Engine test run mode changed unexpectedly; '
@@ -1066,7 +1081,8 @@ def worker_class(base,context,publish):
                     if target.suffix=='.csv':
                         # Acquisition has completed; report generation does not restart initialization.
                         from backend.engine_initialization_adapter import mark
-                        mark(self, 'COMPLETE')
+                        if not ((context.get('test_reference') == '2.c.(8b)' and getattr(self, '_stall_measurement_error', None)) or (context.get('test_reference') == '2.a.(8)' and getattr(self, '_buc_measurement_error', None))):
+                            mark(self, 'COMPLETE')
                         target.with_suffix('.qtg_test.json').write_text(json.dumps(context,indent=2),encoding='utf-8')
             if getattr(self,'_control_method','replay')=='pid':
                 evaluations=[Path(path) for path in self._outputs if path.endswith('_evaluation.json')]
@@ -1078,13 +1094,19 @@ def worker_class(base,context,publish):
                     self.current_stage=base.STAGE_CONNECTION_ERROR
                     self._stage_details='PID data saved, but report generation failed. Check validation CSV and diagnostics.'
             if self.current_stage=='Generating reports': self.current_stage=base.STAGE_COMPLETED
+            if context.get('test_reference') == '2.c.(8b)' and getattr(self, '_stall_measurement_error', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Stall recording interrupted: ' + self._stall_measurement_error
+            if context.get('test_reference') == '2.a.(8)' and getattr(self, '_buc_measurement_error', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Throttle alignment recording interrupted: ' + self._buc_measurement_error
             from backend.engine_initialization_adapter import mark
             if self.current_stage == base.STAGE_COMPLETED:
                 mark(self, 'COMPLETE')
             if getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None):
                 self.current_stage=base.STAGE_CONNECTION_ERROR
                 self._stage_details='Incomplete PID test: '+self.pid_fault
-            if any(path.lower().endswith('.pdf') for path in self._outputs) and not (getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None)):
+            if any(path.lower().endswith('.pdf') for path in self._outputs) and not (context.get('test_reference') == '2.c.(8b)' and getattr(self, '_stall_measurement_error', None)) and not (context.get('test_reference') == '2.a.(8)' and getattr(self, '_buc_measurement_error', None)) and not (getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None)):
                 self.lbl_rec_status.setText('COMPLETED - CSV and PDF reports saved')
             if context.get('test_reference') == '1.f.(2)':
                 from backend.deceleration_config import write_output_manifest
@@ -1141,6 +1163,20 @@ def run(context_path):
         with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
             with redirect_stdout(stream), redirect_stderr(stream):
                 return run_automatic_control(context, publish)
+    from backend.automatic_trim import selected as trim_selected
+    if trim_selected(context):
+        from contextlib import redirect_stdout, redirect_stderr
+        from backend.automatic_trim import run as run_automatic_trim
+        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                return run_automatic_trim(context, publish)
+    from backend.automatic_stall import selected as stall_selected
+    if stall_selected(context):
+        from contextlib import redirect_stdout, redirect_stderr
+        from backend.automatic_stall import run as run_automatic_stall
+        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
+            with redirect_stdout(stream), redirect_stderr(stream):
+                return run_automatic_stall(context, publish)
     stream=open(status_path.with_suffix('.log'),'a',encoding='utf-8',buffering=1)
     sys.stdout=sys.stderr=stream
     base=load_base()

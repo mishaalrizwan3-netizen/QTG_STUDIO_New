@@ -1026,7 +1026,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
 
     # Clean report notes; detailed diagnostic status remains in recorded metadata.
 
-    ax.text(0.05, 0.18, "Time zero: measured throttle movement in each run.", fontsize=8.0, family="monospace")
+    ax.text(0.05, 0.18, "Graph time zero: recording start; dotted line: measured throttle movement.", fontsize=8.0, family="monospace")
 
     ax.text(0.05, 0.10, f"Source: {Path(source_path).name}", fontsize=6.5, family="monospace", color="gray")
 
@@ -1146,30 +1146,21 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
     sim_event = _resolve_event_time(sim_path, sim_df, kind=kind.lower(), meta=metadata)
 
-    ref_event = _resolve_event_time(ref_path, ref_df, kind=kind.lower()) if has_ref else 0.0
+    t_sim = _series(sim_df, "time_s")
 
-
-
-    t_sim = _series(sim_df, "time_s") - sim_event
-
-    t_ref = (_series(ref_df, "time_s") - ref_event) if has_ref else None
+    t_ref = _series(ref_df, "time_s") if has_ref else None
 
 
 
     all_t = list(t_sim[np.isfinite(t_sim)])
 
-    if has_ref and t_ref is not None:
+    min_x = 0.0
 
-        all_t += list(t_ref[np.isfinite(t_ref)])
+    max_x = float(max(all_t)) if all_t else 1.0
 
-    min_x = math.floor(min(all_t)) if all_t else -5.0
-
-    max_x = math.ceil(max(all_t)) if all_t else 15.0
-
-    # Engine reports show the measured lead-in immediately before throttle movement.
-    # The full startup history remains in the source CSV.
-    if kind.lower() in ("acceleration", "deceleration"):
-        min_x = max(min_x, -2.0)
+    # Recording start is zero; the throttle step stays at its measured time.
+    if max_x <= min_x:
+        max_x = min_x + 1.0
 
 
 
@@ -1180,10 +1171,6 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
         report_meta = dict(metadata or {})
 
         report_meta["status"] = status
-
-        _initial_page(pdf, "auto" if is_auto else "manual", sim_path, sim_df, ref_df, metadata=report_meta)
-
-
 
         # Pages 2-4: engine/flight performance ONLY; no control plots
 
@@ -1210,27 +1197,35 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
             if additional:
                 groups.extend(('Additional measurements', additional[i:i + 4]) for i in range(0, len(additional), 4))
             groups = [(name, entries) for name, entries in groups if entries]
+        all_channels = [item for _, entries in groups for item in entries]
+        compact = selected_graphs is not None and 0 < len(all_channels) <= 3
+        if compact:
+            groups = [('Selected measurements', all_channels)]
+        _initial_page(pdf, "auto" if is_auto else "manual", sim_path, sim_df, ref_df, metadata=report_meta)
         for page_idx, (group_name, channels) in enumerate(groups, start=2):
 
-            fig, axs = plt.subplots(len(channels), 1, figsize=(8.27, 11.69))
-
-            fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.060, hspace=0.38)
-
-            if len(channels) == 1:
-
-                axs = [axs]
-
-            fig.suptitle(f"1st Quadrant Combined {group_name}", fontsize=15, fontweight="bold")
+            if compact:
+                fig, axs = plt.subplots(len(channels), 1, figsize=(8.27, 11.69))
+                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.060, hspace=0.38)
+                if len(channels) == 1:
+                    axs = [axs]
+                fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
+            else:
+                fig, axs = plt.subplots(len(channels), 1, figsize=(8.27, 11.69))
+                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.060, hspace=0.38)
+                if len(channels) == 1:
+                    axs = [axs]
+                fig.suptitle(f"1st Quadrant Combined {group_name}", fontsize=15, fontweight="bold")
 
 
 
             for ax, (title, key, unit, opts) in zip(axs, channels):
 
-                ax.set_title(title, fontsize=11, fontweight="bold")
+                ax.set_title(title, fontsize=7 if compact else 11, fontweight="bold")
 
                 ax.set_ylabel(unit, fontweight="bold")
 
-                ax.set_xlabel("Seconds from throttle movement", fontweight="bold")
+                ax.set_xlabel("Time from recording start (s)", fontweight="bold")
 
 
 
@@ -1371,6 +1366,9 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
                 # Grid & limits
 
                 ax.set_xlim(min_x, max_x)
+                if compact:
+                    ax.tick_params(labelsize=7)
+                    ax.xaxis.label.set_size(7); ax.yaxis.label.set_size(7)
 
                 if key in ("engine_rpm", "prop_rpm"):
 
@@ -1436,13 +1434,11 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                             lv = _series(legacy, key) if legacy is not None else np.array([])
 
-                            event = sim_event if label == "Automatic" or not is_auto else ref_event
-
                             if len(lt) == len(lv) and np.isfinite(lt).any():
 
                                 ok = np.isfinite(lt) & np.isfinite(lv)
 
-                                ax.plot(lt[ok] - event, lv[ok], ":", linewidth=1.5,
+                                ax.plot(lt[ok], lv[ok], ":", linewidth=1.5,
 
                                         color="#ca7a12", label=f"{label} legacy 1 Hz (RPM channel conflict)")
 
@@ -1478,7 +1474,10 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                 ax.grid(True, which="minor", alpha=0.20, linewidth=0.45)
 
-                ax.axvline(0, color="gray", linestyle=":", linewidth=1.0)
+                ax.axvline(sim_event, color="gray", linestyle=":", linewidth=1.0)
+                if key == "throttle_pct":
+                    ax.axhline(10, color="#a65e00", linestyle="--", linewidth=1.0, label="10% throttle guide")
+                    ax.axhline(90, color="#7452a8", linestyle="--", linewidth=1.0, label="90% throttle guide")
 
 
 
@@ -1505,7 +1504,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
                      ha="center", fontsize=8, family="monospace")
 
             if kind.lower() in ("acceleration", "deceleration"):
-                fig.text(0.5, 0.033, "Pre-event view: last 2 s of measured data; full startup history remains in CSV.",
+                fig.text(0.5, 0.033, "Time starts at recording; dotted vertical line marks measured throttle movement.",
                          ha="center", fontsize=7, color="#555555")
             pdf.savefig(fig)
 

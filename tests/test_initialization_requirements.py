@@ -7,7 +7,7 @@ from backend.initialization_requirements import FIELDS, REQUIREMENTS, build_regi
 
 class InitializationRequirementsTests(unittest.TestCase):
     def test_all_thirty_catalog_references_and_names(self):
-        self.assertEqual(len(TESTS), 30)
+        self.assertEqual(len(TESTS), 31)
         self.assertEqual(set(REQUIREMENTS), {test.reference for test in TESTS})
         for test in TESTS:
             policy = REQUIREMENTS[test.reference]
@@ -77,7 +77,7 @@ class InitializationRequirementsTests(unittest.TestCase):
         fresh = build_registry()
         self.assertIsNot(fresh['1.f.(2)'].requirements, REQUIREMENTS['1.f.(2)'].requirements)
         self.assertEqual(sum(p.status == 'CONFIGURED' for p in fresh.values()), 2)
-        self.assertEqual(sum(p.status == 'UNCONFIGURED' for p in fresh.values()), 28)
+        self.assertEqual(sum(p.status == 'UNCONFIGURED' for p in fresh.values()), 29)
         self.assertIn('cg', fresh['1.f.(2)'].missing_requirements)
 
 

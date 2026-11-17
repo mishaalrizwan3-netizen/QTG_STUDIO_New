@@ -45,9 +45,14 @@ TESTS = [
     TestSpec("2.a.(4)", "Pitch trim system rate and authority", "Static Control Checks", 62,
              "",
              "", "± 10% travel rate | ± 0.5 s or ± 10% time for full travel | ± 0.5 cm (0.2 in) or ± 10% cockpit trim control"),
-    TestSpec("2.a.(5)", "Rudder trim system rate and authority", "Static Control Checks", 64,
-             "",
-             "", "± 10% travel rate | ± 0.5 s or ± 10% time for full travel | ± 0.5 cm (0.2 in) or ± 10% rudder trim control"),
+    TestSpec("2.c.(8b)", "Stall warning (approach-to-stall characteristics)", "Static Control Checks", 73,
+             "To record the aircraft's approach-to-stall characteristics.",
+             "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 0 | Temperature[C]: 15 | Throttle[%]: 80",
+             "± 3 kt stall warning speed | ± 2° angle of attack at initial buffet | ± 2° pitch, angle of attack and bank | ± 10% or ± 5 lb stick force where applicable"),
+    TestSpec("2.a.(8)", "Cockpit throttle lever alignment vs engine parameter", "Static Control Checks", 64,
+             "Record cockpit throttle, propeller and mixture lever positions with simulator engine parameters.",
+             "Flt cond: Ground | IAS[kts]: 0",
+             "± 5° TLA or ± 3% N1 or ± 0.03 EPR or ± 3% torque; ± 2 cm for non-angular propeller levers; compare with aircraft validation data"),
 
     # --- Longitudinal Handling (10 tests) ---
     TestSpec("2.b.(1)", "Longitudinal trim", "Longitudinal Handling", 69,

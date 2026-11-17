@@ -364,6 +364,8 @@ def run_initialization(window, mode, entry, policy=None):
             window.brunner.prepare_manual_mode()
             if window.stop_worker_event.is_set():raise RuntimeError('Engine initialization cancelled.')
             if cfg.get('on_ground'):
+                if not sim.set_initial_throttle(5.):
+                    raise RuntimeError('Initial idle throttle rejected.')
                 if not sim.queue_position_airborne(alt_ft=cfg['alt_ft'],speed_kts=0.,pitch_deg=cfg.get('pitch_deg',0.),bank_deg=-cfg.get('bank_deg',0.),
                     hdg_deg=cfg.get('heading_deg',48.4),lat=cfg.get('lat',32.23366667),lon=cfg.get('lon',74.1235),on_ground=True):
                     raise RuntimeError('Ground position rejected.')
@@ -372,6 +374,9 @@ def run_initialization(window, mode, entry, policy=None):
                     hdg_deg=cfg.get('heading_deg',0.),lat=cfg.get('lat',32.235),lon=cfg.get('lon',74.135))
             window._wait_for_initial_altitude(cfg['alt_ft'])
             if not sim.wait_for_paused(3.):raise RuntimeError('Simulator did not confirm pause.')
+            if cfg.get('on_ground'):
+                from backend.initializer import verify_manual_deceleration_brake
+                verify_manual_deceleration_brake(window)
             if not sim.set_initial_throttle(cfg['throttle']):raise RuntimeError('Initial throttle rejected.')
             if hasattr(sim, 'set_initial_flaps'):
                 sim.set_initial_flaps(cfg['flaps'])

@@ -106,7 +106,24 @@ PDF_CHANNELS = [
     ("P3D elevator input (normalised)", "elevator_input_norm"),
     ("P3D aileron input (normalised)", "aileron_input_norm"),
     ("P3D rudder input (normalised)", "rudder_input_norm"),
+    ("Elevator trim position (rad)", "trim_position_rad"),
+    ("Pitch trim position - ELEVATOR TRIM INDICATOR", "trim_indicator"),
+    ("Elevator trim value (%)", "trim_value_pct"),
+    ("Elevator surface position (rad)", "trim_elevator_surface_rad"),
     ("Ti/Tt response analysis", "titt")]
+
+STALL_CHANNELS = [
+    ("Angle of attack (deg)", "stall_aoa"),
+    ("Stall warning (on/off)", "stall_warning"),
+    ("Elevator surface position (rad)", "stall_elevator")]
+
+BUC_CHANNELS = [
+    ('Cockpit throttle Z rotation (%)', 'buc_throttle'),
+    ('Cockpit propeller slider (%)', 'buc_propeller'),
+    ('Cockpit mixture dial (%)', 'buc_mixture'),
+    ('P3D engine torque (ft lb)', 'buc_torque'),
+    ('P3D propeller lever (%)', 'buc_sim_propeller'),
+    ('P3D mixture lever (%)', 'buc_sim_mixture')]
 
 CLIMB_DEFAULT_KEYS = {
     "ias_kt", "vertical_speed_fpm", "altitude_msl_ft",
@@ -143,23 +160,37 @@ def default_channels_for_spec(spec_ref):
         return set(STATIC_ROLL_DEFAULT_KEYS)
     elif spec_ref == "2.a.(3)":
         return set(STATIC_YAW_DEFAULT_KEYS)
-    return {col for _, col in PDF_CHANNELS}
+    elif spec_ref == "2.a.(4)":
+        return {col for _, col in PDF_CHANNELS}
+    elif spec_ref == "2.c.(8b)":
+        return {"ias_kt", "stall_aoa", "stall_warning", "pitch_deg", "bank_deg", "pitch_position", "stall_elevator"}
+    elif spec_ref == '2.a.(8)':
+        return {'buc_throttle', 'buc_propeller', 'buc_mixture', 'throttle_pct', 'engine_rpm',
+                'prop_rpm', 'buc_torque', 'buc_sim_propeller', 'buc_sim_mixture'}
+    return {col for _, col in PDF_CHANNELS} - {"trim_position_rad", "trim_indicator", "trim_value_pct", "trim_elevator_surface_rad"}
 
 def read_graph_csv(path):
     """Read measured channels only; do not invent absent telemetry."""
     import csv
-    from plot_graphs import ALIASES
+    from reports.plot_graphs import ALIASES
     extra = {
         "time_s": ["Time (s)", "Time (seconds)"],
         "altitude_msl_ft": ["Indicated Altitude (ft)"],
         "vertical_speed_fpm": ["Rate of Climb/Descent (fpm)", "Vertical Velocity (ft/min)", "Vertical Speed (ft/min)"],
         "pitch_deg": ["Pitch Angle (deg)"], "bank_deg": ["Bank Angle (deg)"],
         "heading_deg": ["Magnetic Heading (deg)", "Heading (deg)"],
-        "pitch_rate": ["Pitch Rate (deg/s)"], "yaw_rate": ["Yaw Rate (deg/s)"]}
+        "pitch_rate": ["Pitch Rate (deg/s)"], "yaw_rate": ["Yaw Rate (deg/s)"],
+        "stall_aoa": ["Aircraft Angle of Attack (deg)"],
+        "stall_warning": ["Stall Warning (0/1)"],
+        "stall_elevator": ["Elevator Surface (rad)"],
+        "stall_pitch_position": ["BRUNNER Pitch Position (raw)"],
+        'buc_throttle':['BUC Throttle Z Rotation (%)'], 'buc_propeller':['BUC Propeller Slider (%)'],
+        'buc_mixture':['BUC Mixture Dial (%)'], 'buc_torque':['Engine Torque (ft lb)'],
+        'buc_sim_propeller':['Propeller 1 Lever (%)'], 'buc_sim_mixture':['Mixture 1 Position (%)']}
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         rows = list(csv.DictReader(stream))
     channels = {}
-    for key in ["time_s"] + [key for _, key in PDF_CHANNELS if key != "titt"]:
+    for key in ["time_s"] + [key for _, key in PDF_CHANNELS + STALL_CHANNELS + BUC_CHANNELS if key != "titt"]:
         names = [key] + ALIASES.get(key, []) + extra.get(key, [])
         if key in ("pitch_position", "roll_position", "rudder_position"):
             names = [name for name in names if "norm" not in name.lower()]
@@ -284,7 +315,7 @@ from backend.catalog import TestSpec, TESTS
 
 for spec in TESTS:
     def_keys = default_channels_for_spec(spec.reference)
-    spec.pdf_graphs = [(label, col) for label, col in PDF_CHANNELS if col in def_keys]
+    spec.pdf_graphs = [(label, col) for label, col in (PDF_CHANNELS + (STALL_CHANNELS if spec.reference == '2.c.(8b)' else []) + (BUC_CHANNELS if spec.reference == '2.a.(8)' else [])) if col in def_keys]
 
 
 # ======================== SECTION 2: C++ SIMCONNECT BRIDGE WRAPPER ====================
@@ -1897,7 +1928,8 @@ class App(tk.Tk):
             border="#CBD5E1", parent_bg=COL["bg"],
             font=(FONT, 11, "bold")
         )
-        self.btn_subtab_auto.pack(side="left")
+        if spec.reference != '2.a.(8)':
+            self.btn_subtab_auto.pack(side="left")
         if spec.reference == '1.c.(2)':
             for button in (self.btn_subtab_manual, self.btn_subtab_auto):
                 button.command = None
@@ -2135,7 +2167,7 @@ class App(tk.Tk):
             if self._universal_initialize_button is not None:
                 self._universal_initialize_button.configure(state='disabled' if phase=='INITIALIZING' else 'normal')
         stage=state.get("stage","Connecting")
-        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step'}.get(state.get('control_method'), 'Recorded Replay')
+        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step', 'stall': 'Stall Warning', 'pitch_trim': 'Pitch Trim Step'}.get(state.get('control_method'), 'Recorded Replay')
         text=f"Test {state.get('test_reference','')} - {state.get('mode','').title()} ({method_name}): {stage}"
         if state.get("details"): text+="\n"+state["details"]
         if state.get("evaluation_result"): text+="\nValidation: "+state["evaluation_result"]
@@ -2174,8 +2206,8 @@ class App(tk.Tk):
         self._common_view_labels["recording_indicator"].configure(fg=COL["green"] if recording_live else COL["dim"])
 
         if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
-            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)')
-                               and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control")))
+            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)', '2.a.(4)', '2.c.(8b)')
+                               and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control", "pitch_trim")))
             if is_special_auto:
                 if self.common_reference_frame.winfo_manager():
                     self.common_reference_frame.pack_forget()
@@ -2196,6 +2228,9 @@ class App(tk.Tk):
     def _launch_common_test(self, mode, spec, force_initialize=False, control_method=None):
         import os
         try:
+            if spec.reference == '2.a.(8)' and mode != 'manual':
+                self.common_status.configure(text='Throttle lever alignment is a Manual test.', fg=COL['amber'])
+                return
             if spec.reference == '1.c.(2)':
                 self.common_status.configure(text='This multi-engine test is available for settings review only; execution is not supported by the current single-engine application.',fg=COL['amber'])
                 return
@@ -2213,9 +2248,17 @@ class App(tk.Tk):
                     return
             from qtg_common_engine import launch,validate_duration,validate_reference
             duration=validate_duration(self._common_duration_var.get())
-            if control_method not in (None,"pid","replay","engine_step","static_control"):raise ValueError("Unknown automatic control method")
+            if control_method not in (None,"pid","replay","engine_step","static_control","pitch_trim","stall"):raise ValueError("Unknown automatic control method")
+            fields, _ = self._test_settings[spec.reference]
+            missing_fields = any(not var.get().strip() for var in fields.values())
+            reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)') and missing_fields)
+            if reference_only:
+                from backend.engine_initialization_adapter import requested as universal_requested
+                reference_only = not universal_requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method or "replay"))
             engine_automatic = mode == 'auto' and spec.reference in ('1.f.(1)', '1.f.(2)')
-            static_control_automatic = mode == 'auto' and spec.reference in ('2.a.(1)', '2.a.(2)', '2.a.(3)')
+            static_control_automatic = mode == 'auto' and spec.reference in ('2.a.(1)', '2.a.(2)', '2.a.(3)') and not reference_only
+            trim_automatic = mode == 'auto' and spec.reference == '2.a.(4)' and not reference_only
+            stall_automatic = mode == 'auto' and spec.reference == '2.c.(8b)' and not reference_only
             if mode == "auto" and spec.reference == "1.c.(1)" and control_method is None:
 
                 selected_method = self._automatic_methods[spec.reference].get()
@@ -2226,11 +2269,15 @@ class App(tk.Tk):
                 method = 'engine_step'
             elif static_control_automatic:
                 method = 'static_control'
+            elif trim_automatic:
+                method = 'pitch_trim'
+            elif stall_automatic:
+                method = 'stall'
             else:
 
                 method = control_method or "replay"
 
-            if engine_automatic or static_control_automatic:
+            if engine_automatic or static_control_automatic or trim_automatic or stall_automatic:
                 if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
                     self.common_reference_frame.pack_forget()
             elif mode == "manual" and spec.reference in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)'):
@@ -2249,11 +2296,6 @@ class App(tk.Tk):
                 for key, value in required.items():
                     if fields[key].get().strip() != value:
                         fields[key].set(value)
-            reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)')
-                              and any(not var.get().strip() for var in fields.values()))
-            if reference_only:
-                from backend.engine_initialization_adapter import requested as universal_requested
-                reference_only = not universal_requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             if reference_only:
                 if not self._apply_test_settings(spec, allow_incomplete=True):
                     return
@@ -2277,6 +2319,8 @@ class App(tk.Tk):
                     temperature_c=float(fields["Temperature[C]"].get()),
                     on_ground="ground" in fields["Flt cond"].get().lower(),
                 )
+                if spec.reference == '2.a.(8)' and (not initial['on_ground'] or initial['ias_kt'] != 0):
+                    raise ValueError('Throttle lever alignment requires Ground and zero IAS in Initial Conditions.')
             if spec.reference == "1.f.(2)":
                 from backend.deceleration_config import display_overrides
                 current_display = {key: var.get() for key, var in fields.items()}
@@ -2304,7 +2348,7 @@ class App(tk.Tk):
                 if validation and not Path(validation).is_file():
                     raise ValueError("Validation dataset not found.")
             from backend.engine_initialization_adapter import requested
-            universal = not (engine_automatic or static_control_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
+            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
             if mode=="auto" and (method=="replay" or universal):
                 if not reference:
@@ -2326,7 +2370,7 @@ class App(tk.Tk):
                 if state.get("controlling") or state.get("recording") or state.get("stage") in ("Initializing aircraft","Generating reports"):
                     self.common_status.configure(text="Stop the active test and wait for preparation to finish before initializing again.",fg=COL["amber"])
                     return
-                if (method in ('engine_step', 'static_control') or self._common_context.get('control_method') in ('engine_step', 'static_control')):
+                if (method in ('engine_step', 'static_control', 'pitch_trim', 'stall') or self._common_context.get('control_method') in ('engine_step', 'static_control', 'pitch_trim', 'stall')):
                     self._common_command('shutdown')
                     self.common_record_button.configure(state='disabled')
                     self.common_status.configure(text='Closing the previous test worker before initialization...', fg=COL['blue'])
@@ -3303,7 +3347,13 @@ class App(tk.Tk):
             except (OSError, ValueError) as exc:
                 messagebox.showerror('Saved initial conditions', str(exc), parent=self)
                 self._visible_condition_fields[spec.reference] = list(FIELDS)
-            channels = PDF_CHANNELS
+            trim_keys = {"trim_position_rad", "trim_indicator", "trim_value_pct", "trim_elevator_surface_rad"}
+            channels = (PDF_CHANNELS if spec.reference == '2.a.(4)' else
+                        [(label, key) for label, key in PDF_CHANNELS if key not in trim_keys])
+            if spec.reference == '2.c.(8b)':
+                channels = channels + STALL_CHANNELS
+            if spec.reference == '2.a.(8)':
+                channels = channels + BUC_CHANNELS
             def_keys = default_channels_for_spec(spec.reference)
             from backend.pdf_graph_settings import load as load_pdf_settings
             try:
@@ -3313,6 +3363,9 @@ class App(tk.Tk):
                 saved_pdf = None
             if saved_pdf is not None:
                 def_keys = set(saved_pdf['selected_graphs'])
+                if spec.reference == '2.c.(8b)' and 'stall_pitch_position' in def_keys:
+                    def_keys.discard('stall_pitch_position')
+                    def_keys.add('pitch_position')
             if not hasattr(self, '_graph_csv_paths'):
                 self._graph_csv_paths = {}
             self._graph_csv_paths[spec.reference] = tk.StringVar(
@@ -3378,10 +3431,15 @@ class App(tk.Tk):
         if not hasattr(self,"_automatic_methods"): self._automatic_methods={}
         self._automatic_methods.setdefault(spec.reference,tk.StringVar(value="PID Automatic" if spec.reference=="1.c.(1)" else "Recorded Replay"))
         self._label(box,"Automatic Control Method",10,COL["text"],"bold").pack(anchor="w",pady=(4,2))
-        methods=["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)') else (["Recorded Replay","PID Automatic"] if spec.reference=="1.c.(1)" else ["Recorded Replay"])
+        methods=["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)') else (["Pitch Trim Buttons"] if spec.reference == '2.a.(4)' else (["Recorded Replay","PID Automatic"] if spec.reference=="1.c.(1)" else ["Recorded Replay"]))
+        if spec.reference == '2.c.(8b)':
+            methods = ['Pitch Stall Controller']
+            self._automatic_methods[spec.reference].set('Pitch Stall Controller')
         if spec.reference in ('1.f.(1)', '1.f.(2)'):
             self._automatic_methods[spec.reference].set('P3D Throttle Step')
             self._label(box, 'Automatic initializes from Test Settings. Acceleration uses 5% idle to 100% throttle; Deceleration uses 100% to 5% idle. Click Start Recording when READY TO RECORD. Records 5 seconds, steps the P3D throttle, then stops after 3 seconds at target RPM. No Manual reference is required. Deceleration requires parking brake ON before full throttle.', 8, COL['dim'], wraplength=235, justify='left').pack(fill='x', pady=4)
+        if spec.reference == '2.a.(4)':
+            self._automatic_methods[spec.reference].set('Pitch Trim Buttons')
         method_combo=ttk.Combobox(box,textvariable=self._automatic_methods[spec.reference],values=methods,
                      state="readonly" if unlocked else "disabled")
         method_combo.pack(fill="x")

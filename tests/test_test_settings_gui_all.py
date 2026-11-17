@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from tkinter import ttk
+import tkinter as tk
 
 from frontend import main
 from backend.initial_condition_settings import load
@@ -17,6 +18,42 @@ def descendants(widget):
 
 
 class AllTestSettingsGUI(unittest.TestCase):
+    def test_throttle_alignment_hides_automatic_but_stall_keeps_it(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \
+                patch.object(main, 'RESULTS_ROOT', Path(folder)):
+            app = main.App()
+            app.withdraw()
+            try:
+                app.select_test(next(i for i, spec in enumerate(main.TESTS) if spec.reference == '2.a.(8)'))
+                self.assertEqual(app.btn_subtab_manual.winfo_manager(), 'pack')
+                self.assertEqual(app.btn_subtab_auto.winfo_manager(), '')
+                app.select_test(next(i for i, spec in enumerate(main.TESTS) if spec.reference == '2.c.(8b)'))
+                self.assertEqual(app.btn_subtab_auto.winfo_manager(), 'pack')
+            finally:
+                app.destroy()
+
+    def test_pitch_trim_settings_show_all_trim_graphs(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \
+                patch.object(main, 'RESULTS_ROOT', Path(folder)), \
+                patch.object(main.simpledialog, 'askstring', return_value=main.TEST_ADMIN_PASSWORD):
+            app = main.App()
+            app.withdraw()
+            try:
+                index = next(i for i, spec in enumerate(main.TESTS) if spec.reference == '2.a.(4)')
+                app.select_test(index)
+                app._open_test_password_dialog(index)
+                labels = [w.cget('text') for w in descendants(app.settings_panel) if isinstance(w, tk.Checkbutton)]
+                self.assertIn('Elevator trim position (rad)', labels)
+                self.assertIn('Pitch trim position - ELEVATOR TRIM INDICATOR', labels)
+                self.assertIn('Elevator trim value (%)', labels)
+                self.assertIn('Elevator surface position (rad)', labels)
+                self.assertIn('Indicated airspeed (kt)', labels)
+                self.assertIn('Joystick pitch position (mm)', labels)
+            finally:
+                app.destroy()
+
     def test_edits_are_restored_after_app_restart_without_save_button(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \
@@ -92,7 +129,7 @@ class AllTestSettingsGUI(unittest.TestCase):
             app = main.App()
             app.withdraw()
             try:
-                self.assertEqual(len(main.TESTS), 30)
+                self.assertEqual(len(main.TESTS), 31)
                 for index, spec in enumerate(main.TESTS):
                     with self.subTest(reference=spec.reference):
                         app.select_test(index)

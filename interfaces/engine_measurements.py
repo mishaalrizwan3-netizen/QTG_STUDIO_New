@@ -1,4 +1,4 @@
-"""Correlated, read-only engine measurements using the existing SDK DLL.
+"""Correlated engine measurements using the existing SDK DLL.
 
 No BRUNNER imports, actuator writes, or dependency on the legacy telemetry layout.
 All calls and dispatch run on the worker's single owner thread.
@@ -35,11 +35,13 @@ CHANNELS = (
 
 
 class Measurements:
-    def __init__(self, dll_path, *, clock=time.monotonic):
+    def __init__(self, dll_path, *, clock=time.monotonic, channels=None):
         self.clock = clock
+        self.channels = CHANNELS if channels is None else tuple(channels)
         self.dll = C.CDLL(str(Path(dll_path)))
         self.handle = C.c_void_p()
         self.pending = None
+        self.request_counter = 99
         self.sequence = 0
         self.latest = None
         self.error = ''
@@ -60,7 +62,7 @@ class Measurements:
         self.callback = self.callback_type(self._receive)
         try:
             self._check(self.dll.SimConnect_Open(C.byref(self.handle), b'QTG engine measurements', None, 0, None, 0))
-            for _, name, unit in CHANNELS:
+            for _, name, unit in self.channels:
                 self._check(self.dll.SimConnect_AddToDataDefinition(
                     self.handle, 1, name.encode(), unit.encode(), 4, 0., 0xFFFFFFFF))
         except Exception:
@@ -83,11 +85,12 @@ class Measurements:
                 raise RuntimeError('Simulator exception or disconnect in engine measurement session')
             if kind != 8:
                 return
-            if size < 40 + 8 * len(CHANNELS):
+            channels = getattr(self, 'channels', CHANNELS)
+            if size < 40 + 8 * len(channels):
                 raise RuntimeError('Truncated engine measurement response')
             if header[3] != self.pending:
                 return  # Delayed response cannot refresh the current request.
-            if header[5] != 1 or header[6] != 0 or header[9] != len(CHANNELS):
+            if header[5] != 1 or header[6] != 0 or header[9] != len(channels):
                 raise RuntimeError('Invalid correlated engine measurement response: '
                                    f'definition={header[5]}, flags={header[6]}, count={header[9]}')
             # SIMCONNECT_OBJECT_ID_USER (zero) selects the user aircraft in the
@@ -96,14 +99,17 @@ class Measurements:
             if self.object_id is not None and header[4] != self.object_id:
                 raise RuntimeError(f'User aircraft changed during measurement: {self.object_id} to {header[4]}')
             received_at = self.clock()
-            if self.requested_at is None or not 0 <= received_at - self.requested_at <= 1.0:
-                raise RuntimeError('Engine measurement response was delayed or has an invalid clock')
+            if self.requested_at is None or received_at < self.requested_at:
+                raise RuntimeError('Engine measurement response has an invalid clock')
+            if received_at - self.requested_at > 1.0:
+                self.discard_pending()
+                return  # Expired response cannot refresh measurements.
             values = C.cast(pointer + 40, C.POINTER(C.c_double))
-            measured = {key: float(values[i]) for i, (key, _, _) in enumerate(CHANNELS)}
+            measured = {key: float(values[i]) for i, (key, _, _) in enumerate(channels)}
             essential = ('rpm', 'throttle', 'sim_time', 'alt_ft', 'ias_kt')
             if not all(math.isfinite(measured[k]) for k in essential if k in measured):
                 raise RuntimeError('Nonfinite engine measurement')
-            if measured['parking_brake'] not in (0., 1.) or measured['on_ground'] not in (0., 1.):
+            if any(key in measured and measured[key] not in (0., 1.) for key in ('parking_brake', 'on_ground')):
                 raise RuntimeError('Invalid engine measurement boolean')
             self.object_id = header[4]
             self.sequence += 1
@@ -115,16 +121,34 @@ class Measurements:
             self.error = str(exc)
 
     def poll(self):
+        if self.pending is not None and self.clock() - self.requested_at > 1.0:
+            self.discard_pending()
         self._check(self.dll.SimConnect_CallDispatch(self.handle, self.callback, None))
         if self.error:
             raise RuntimeError(self.error)
         if self.pending is None:
-            self.pending = self.sequence + 100
+            self.request_counter += 1
+            self.pending = self.request_counter
             self.requested_at = self.clock()
             self._check(self.dll.SimConnect_RequestDataOnSimObject(self.handle, self.pending, 1, 0, 1, 0, 0, 0, 0))
-        elif self.clock() - self.requested_at > 1.0:
-            raise RuntimeError('Timed out waiting for a fresh engine measurement response')
-        return self.latest
+        if self.latest is not None and self.clock() - self.latest['receipt_time'] <= 1.0:
+            return self.latest
+        return None
+
+    def discard_pending(self):
+        """Discard a request made before a blocking initialization operation."""
+        self.pending = None
+        self.requested_at = None
+
+    def engage_parking_brake(self):
+        """Send one parking-brake toggle after the caller verified it is OFF."""
+        u, p = C.c_uint32, C.c_void_p
+        mapping = self.dll.SimConnect_MapClientEventToSimEvent
+        mapping.argtypes, mapping.restype = [p, u, C.c_char_p], C.c_int32
+        transmit = self.dll.SimConnect_TransmitClientEvent
+        transmit.argtypes, transmit.restype = [p, u, u, u, u, u], C.c_int32
+        self._check(mapping(self.handle, 901, b'PARKING_BRAKES'))
+        self._check(transmit(self.handle, 0, 901, 0, 1, 0x10))
 
     def close(self):
         if self.handle.value:

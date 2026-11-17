@@ -88,6 +88,9 @@ class MockSimConnect:
     def pause_sim(self):
         self.paused = True
 
+    def wait_for_paused(self, timeout_sec=3.0):
+        return self.paused
+
 
 class MockBrunner:
     def __init__(self, connected=True):
@@ -207,7 +210,7 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
                 'lat': 32.233667,
                 'lon': 74.1235,
                 'heading_deg': 48.4,
-                'on_ground': True,
+                'on_ground': False,
             },
             'result_directory': str(self.root / f"test_{ref.replace('.', '_')}"),
         }
@@ -222,6 +225,15 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
         self.assertFalse(selected({'mode': 'manual', 'control_method': METHOD, 'test_reference': TEST_PITCH}))
         self.assertFalse(selected({'mode': 'auto', 'control_method': 'replay', 'test_reference': TEST_PITCH}))
         self.assertFalse(selected({'mode': 'auto', 'control_method': METHOD, 'test_reference': '1.f.(1)'}))
+
+    def test_initialization_does_not_depend_on_pause_subscription(self):
+        sim = MockSimConnect()
+        sim.simulation_running = lambda: (_ for _ in ()).throw(RuntimeError('pause state unavailable'))
+        worker = AutomaticControl(self.make_context(), sim, MockBrunner(), lambda _: None, clock=self.clock)
+        worker.step()
+        self.assertNotEqual(worker.stage, 'ABORTED')
+        self.assertNotEqual(worker.stage, 'FAILED')
+        self.assertTrue(sim.positions)
 
     def test_initial_status_is_strict_json_before_telemetry_arrives(self):
         worker = AutomaticControl(self.make_context(), MockSimConnect(), MockBrunner(), lambda _: None, clock=self.clock)
@@ -288,6 +300,8 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
             self.assertIn('N/A', page)
             self.assertIn('610.0', page)
             self.assertIn('750.0', page)
+            self.assertIn('Sim', page)
+            self.assertNotIn('Validation', page)
 
     def test_paused_sim_is_unpaused_to_apply_position_and_paused_when_ready(self):
         sim = MockSimConnect()
@@ -304,13 +318,31 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
         self.assertEqual(worker.stage, 'READY TO RECORD')
         self.assertTrue(sim.paused)
 
+    def test_unconfirmed_pause_does_not_expose_ready_to_record(self):
+        sim = MockSimConnect()
+        sim.wait_for_paused = lambda timeout_sec=3.0: False
+        ctx = self.make_context()
+        ctx['initial_conditions'].update(throttle=80.0, alt_ft=5000.0, ias_kt=80.0)
+        worker = AutomaticControl(ctx, sim, MockBrunner(), lambda _: None, clock=self.clock)
+        worker.step()
+        sample = {'engine_throttle_percent': 80.0, 'airspeed_indicated': 80.0,
+                  'indicated_altitude': 5000.0}
+        with patch.object(sim, 'wait_for_fresh_telemetry', return_value=sample):
+            worker.step()
+        self.assertNotEqual(worker.stage, 'READY TO RECORD')
+        self.assertIn('pause', worker.details.lower())
+
     def test_initialization_does_not_move_physical_controls(self):
         sim = MockSimConnect()
         brunner = MockBrunner()
         published = []
 
         ctx = self.make_context(TEST_PITCH)
-        worker = AutomaticControl(ctx, sim, brunner, published.append, clock=self.clock)
+        ctx['initial_conditions']['on_ground'] = True
+        reader = Mock()
+        reader.poll.return_value = {'parking_brake': 1, 'on_ground': 1, 'ground_speed': 0,
+                                    'receipt_time': self.now, 'sequence': 1}
+        worker = AutomaticControl(ctx, sim, brunner, published.append, clock=self.clock, brake_reader=reader)
 
         # Step during CONNECT
         worker.step()
@@ -325,10 +357,30 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
 
         # Reached READY TO RECORD
         worker.step()
+        worker.step()
         self.assertEqual(worker.stage, 'READY TO RECORD')
         status = worker.status()
         self.assertTrue(status['can_record'])
         self.assertFalse(status['recording'])
+
+    def test_ground_static_waits_for_brake_on_before_requested_throttle(self):
+        sim = MockSimConnect()
+        ctx = self.make_context(TEST_ROLL)
+        ctx['initial_conditions'].update(on_ground=True, throttle=80.0)
+        reader = Mock()
+        reader.poll.side_effect = [
+            dict(parking_brake=0, on_ground=1, ground_speed=0, receipt_time=self.now, sequence=1),
+            dict(parking_brake=1, on_ground=1, ground_speed=0, receipt_time=self.now, sequence=2),
+        ]
+        worker = AutomaticControl(ctx, sim, MockBrunner(), lambda _: None, clock=self.clock, brake_reader=reader)
+        worker.step()
+        worker.step()
+        reader.engage_parking_brake.assert_called_once_with()
+        self.assertEqual(sim.throttles, [5.0])
+        worker.step()
+        self.assertEqual(sim.throttles, [5.0, 80.0])
+        worker.step()
+        self.assertEqual(worker.stage, 'READY TO RECORD')
 
     def test_full_static_control_sequence_and_report_generation(self):
         for ref in (TEST_PITCH, TEST_ROLL, TEST_YAW):
@@ -365,10 +417,11 @@ class AutomaticControlIntegrationTests(unittest.TestCase):
                 self.assertEqual(worker.stage, 'Completed')
                 self.assertEqual(worker.result, 'COMPLETE')
 
-                # Only the selected axis is measured; other axes must not look like measured zeroes.
+                # The other axes are read from BRUNNER for the initial conditions,
+                # without commanding those operator-owned controls.
                 position_columns = {0x01: 'Joystick Pitch Position (mm)', 0x02: 'Joystick Roll Position (mm)', 0x04: 'Rudder Pedal Position (mm)'}
                 for mask, column in position_columns.items():
-                    self.assertEqual(math.isnan(worker.rows[0][column]), mask != worker.axis_mask)
+                    self.assertTrue(math.isfinite(worker.rows[0][column]))
                 self.assertEqual(worker.rows[0]['Control Force (N)'], 0.0)
 
                 # Verify commanded axis: only target axis was commanded

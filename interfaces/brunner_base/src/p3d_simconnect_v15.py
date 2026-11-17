@@ -270,9 +270,16 @@ class SimConnectClient:
         module_dir=Path(__file__).resolve().parent
         resource_dir=Path(getattr(sys,"_MEIPASS",module_dir.parent))
         candidate_paths = [
-            str(resource_dir/"native"/"bin"/filename),
-            str(module_dir.parent/"native"/"bin"/filename),
-            str(module_dir/filename),
+            str(resource_dir / "brunner_base" / "native" / "bin" / filename),
+            str(resource_dir / "interfaces" / "brunner_base" / "native" / "bin" / filename),
+            str(resource_dir / "native" / "bin" / filename),
+            str(module_dir.parent / "native" / "bin" / filename),
+            str(module_dir / filename),
+            str(Path(sys.executable).parent / "_internal" / "brunner_base" / "native" / "bin" / filename),
+            str(Path(sys.executable).parent / "_internal" / "interfaces" / "brunner_base" / "native" / "bin" / filename),
+            str(Path(sys.executable).parent / "_internal" / "native" / "bin" / filename),
+            str(Path(sys.executable).parent / "native" / "bin" / filename),
+            str(Path(sys.executable).parent / filename),
         ]
         self._dll_path = None
         for p in candidate_paths:

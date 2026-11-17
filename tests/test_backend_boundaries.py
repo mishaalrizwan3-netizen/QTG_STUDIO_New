@@ -14,7 +14,7 @@ from interfaces import p3d
 class BackendBoundariesTests(unittest.TestCase):
     def test_gui_uses_shared_catalog_and_interface(self):
         self.assertIs(main.TESTS, catalog.TESTS)
-        self.assertEqual(len(catalog.TESTS), 30)
+        self.assertEqual(len(catalog.TESTS), 31)
         self.assertIs(main.P3DClient, p3d.P3DClient)
         self.assertEqual(registry.get_test("1.f.(1)").title, "Engine acceleration")
         self.assertEqual(registry.get_definition("1.c.(1)")["reference"], "1.c.(1)")

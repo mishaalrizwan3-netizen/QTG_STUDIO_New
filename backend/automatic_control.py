@@ -36,6 +36,76 @@ def _number(data, *keys):
     return float('nan')
 
 
+def recorded_flight_fields(data):
+    """Map the bridge's measured channels to the shared CSV/PDF field names."""
+    prop_rpms = data.get('prop_rpms')
+    prop_rpm = _number({'rpm': prop_rpms[0]}, 'rpm') if isinstance(prop_rpms, (list, tuple)) and prop_rpms else float('nan')
+    return {
+        'Indicated Airspeed (kts)': _number(data, 'airspeed_indicated', 'indicated_airspeed'),
+        'Indicated Altitude (ft)': _number(data, 'indicated_altitude'),
+        'Pressure Alt (ft)': _number(data, 'pressure_alt'),
+        'Radar Alt (ft)': _number(data, 'radar_alt'),
+        'Height of Terrain (ft)': _number(data, 'ground_alt'),
+        'Ground Speed (kt)': _number(data, 'ground_speed'),
+        'Rate of Climb/Descent (fpm)': _number(data, 'vertical_speed'),
+        'Pitch Angle (deg)': _number(data, 'pitch_angle'),
+        'Bank Angle (deg)': _number(data, 'bank_angle'),
+        'Magnetic Heading (deg)': _number(data, 'magnetic_heading', 'true_heading'),
+        'Aircraft Angle of Attack (deg)': _number(data, 'aoa'),
+        'Sideslip Angle (deg)': _number(data, 'sideslip'),
+        'Track Angle (deg)': _number(data, 'track_angle'),
+        'Roll Rate (deg/s)': _number(data, 'roll_rate'),
+        'Pitch Rate (deg/s)': _number(data, 'pitch_rate'),
+        'Yaw Rate (deg/s)': _number(data, 'yaw_rate'),
+        'X Body Acceleration (g)': _number(data, 'accelX') / 32.17404856,
+        'Y Body Acceleration (g)': _number(data, 'accelY') / 32.17404856,
+        'Z Body Acceleration (g)': _number(data, 'accelZ') / 32.17404856,
+        'Gross Wt (kg)': _number(data, 'total_weight'),
+        'Total Fuel Quantity (kg)': _number(data, 'total_fuel_quantity'),
+        'CG Pos (% MAC)': _number(data, 'cg_percent'),
+        'CG Lateral (ft)': _number(data, 'cg_percent_lateral'),
+        'Baro Press (hPa)': _number(data, 'baro_pressure'),
+        'OAT (deg C)': _number(data, 'ambient_temp'),
+        'Wind Dir (mag,deg)': _number(data, 'ambient_wind_dir'),
+        'Wind Spd (kt)': _number(data, 'ambient_wind_spd'),
+        'Throttle 1 Position (%)': _number(data, 'engine_throttle_percent', 'throttle1'),
+        'Engine 1 RPM': _number(data, 'engine_rpm'),
+        'Propeller 1 RPM': prop_rpm,
+        'Fuel Flow (pph)': _number(data, 'fuel_flow_pph', 'fuelFlow'),
+        'EGT (deg C)': _number(data, 'egt_c', 'egt'),
+        'Mach Number (-)': _number(data, 'mach_number'),
+    }
+
+
+def measured_control_fields(brunner, *, exclude_axis=None):
+    """Read the three physical axes without commanding or centering them."""
+    axes = (
+        (0x01, 'Joystick Pitch Position (mm)', 'Joystick Pitch Force (N)', 100.),
+        (0x02, 'Joystick Roll Position (mm)', 'Joystick Roll Force (N)', 60.),
+        (0x04, 'Rudder Pedal Position (mm)', 'Rudder Pedal Force (N)', 80.),
+    )
+    fields = {}
+    if not brunner or not getattr(brunner, 'sock', None):
+        return fields
+    for axis, position_key, force_key, force_scale in axes:
+        if axis == exclude_axis:
+            continue
+        old_strict = getattr(brunner, 'strict_io', False)
+        try:
+            brunner.strict_io = True
+            position, force, _virtual = brunner.read_axis(axis)
+            position, force = float(position), float(force)
+            if math.isfinite(position):
+                fields[position_key] = position * 100.
+            if math.isfinite(force):
+                fields[force_key] = force * force_scale if abs(force) <= 5. else force
+        except (OSError, ValueError, TypeError, RuntimeError):
+            pass
+        finally:
+            brunner.strict_io = old_strict
+    return fields
+
+
 def selected(context: Dict[str, Any]) -> bool:
     """Returns True if context requests Automatic Static Control testing."""
     return (
@@ -49,7 +119,7 @@ class AutomaticControl:
     """Coordinates Automatic Static Control testing for a single axis."""
 
     def __init__(self, context: Dict[str, Any], sim: Any, brunner: Any, publish: Any,
-                 *, clock=time.monotonic, live_hardware: Optional[bool] = None):
+                 *, clock=time.monotonic, live_hardware: Optional[bool] = None, brake_reader=None):
         if not selected(context):
             raise ValueError(f"AutomaticControl requires static_control mode for {STATIC_CONTROL_REFERENCES}")
 
@@ -58,6 +128,12 @@ class AutomaticControl:
         self.brunner = brunner
         self.publish = publish
         self.clock = clock
+        self.brake_reader = brake_reader
+        if brake_reader is not None:
+            from backend.parking_brake import GroundParkingBrake
+            self.ground_brake = GroundParkingBrake(brake_reader.engage_parking_brake)
+        else:
+            self.ground_brake = None
 
         self.test_ref = context['test_reference']
         self.axis_info = AXIS_INFO[self.test_ref]
@@ -113,9 +189,16 @@ class AutomaticControl:
         pitch = _number(self.latest_sim, 'pitch_angle')
         bank = _number(self.latest_sim, 'bank_angle')
         hdg = _number(self.latest_sim, 'true_heading', 'magnetic_heading')
-        vs = self.latest_sim.get('vertical_speed')
-        weight = self.latest_sim.get('total_weight')
-        cg = self.latest_sim.get('cg_percent')
+        sample = getattr(self, 'latest_reader_sample', None) or {}
+        vs = _number(sample, 'vertical_speed')
+        if not math.isfinite(vs):
+            vs = _number(self.latest_sim, 'vertical_speed', 'vertical_speed_fpm', 'verticalSpeed')
+        weight = _number(sample, 'total_weight')
+        if not math.isfinite(weight):
+            weight = _number(self.latest_sim, 'total_weight', 'weight', 'weight_kg', 'totalWeight')
+        cg = _number(sample, 'cg_percent')
+        if not math.isfinite(cg):
+            cg = _number(self.latest_sim, 'cg_percent', 'cg', 'cgPercent')
 
         def display(value, fmt, unit):
             return f'{value:{fmt}}{unit}' if math.isfinite(value) else 'N/A'
@@ -273,6 +356,19 @@ class AutomaticControl:
             self._last_emit_time = now
             self.emit()
 
+    def _request_paused_telemetry(self):
+        """Request a fresh frame without depending on the pause subscription."""
+        if hasattr(self.sim, 'request_telemetry_once'):
+            self.sim.request_telemetry_once()
+
+    def _pause_for_ready(self):
+        """Only declare READY after P3D acknowledges the pause command."""
+        if not hasattr(self.sim, 'pause_sim') or not hasattr(self.sim, 'wait_for_paused'):
+            raise RuntimeError('Simulator pause confirmation is unavailable')
+        self.sim.pause_sim()
+        if not self.sim.wait_for_paused(3.0):
+            raise RuntimeError('Simulator did not confirm pause after initialization')
+
     def step(self):
         """Worker iteration tick."""
         if self.phase in ('DONE', 'CLOSED'):
@@ -281,8 +377,18 @@ class AutomaticControl:
         now = self.clock()
         try:
             # 1. Update SimConnect Telemetry
+            self._request_paused_telemetry()
             if hasattr(self.sim, 'get_telemetry'):
                 self.latest_sim = self.sim.get_telemetry() or {}
+
+            # Poll optional reader for synchronized extra channels outside ground-brake phase
+            if self.phase not in ('CONNECT', 'GROUND_BRAKE') and self.brake_reader and hasattr(self.brake_reader, 'poll'):
+                try:
+                    s = self.brake_reader.poll()
+                    if s:
+                        self.latest_reader_sample = s
+                except Exception:
+                    pass
 
             # 2. Update Brunner Telemetry
             if self.brunner and getattr(self.brunner, 'sock', None):
@@ -313,6 +419,10 @@ class AutomaticControl:
                     lat = float(init_cond.get('lat', 32.233667))
                     lon = float(init_cond.get('lon', 74.1235))
                     hdg = float(init_cond.get('heading_deg', 48.4))
+                    pitch = float(init_cond.get('pitch_deg', 0.0))
+                    bank = float(init_cond.get('bank_deg', 0.0))
+                    flaps = float(init_cond.get('flaps', 0.0))
+                    temp_c = float(init_cond.get('temperature_c', 15.0))
                     on_ground = bool(init_cond.get('on_ground', True))
 
                     throttle = float(init_cond.get('throttle', 0.0))
@@ -320,14 +430,38 @@ class AutomaticControl:
                         raise ValueError('Initial throttle must be between 0 and 100 percent')
                     if not hasattr(self.sim, 'get_telemetry_sequence') or not hasattr(self.sim, 'wait_for_fresh_telemetry'):
                         raise RuntimeError('Fresh simulator telemetry is unavailable')
+                    if hasattr(self.sim, 'set_initial_flaps'):
+                        try:
+                            self.sim.set_initial_flaps(flaps)
+                        except Exception:
+                            pass
+                    if hasattr(self.sim, 'get_global_weather_metar') and hasattr(self.sim, 'set_global_weather_metar'):
+                        try:
+                            from replay_support import reference_weather_metar
+                            cur_metar = self.sim.get_global_weather_metar()
+                            metar = reference_weather_metar({'altitude_msl': alt, 'oat': temp_c}, cur_metar)
+                            if metar:
+                                self.sim.set_global_weather_metar(metar)
+                        except Exception:
+                            pass
+                    if on_ground and (not hasattr(self.sim, 'set_initial_throttle') or not self.sim.set_initial_throttle(5.0)):
+                        raise RuntimeError('Initial idle throttle rejected')
                     if hasattr(self.sim, 'queue_position_airborne'):
                         positioned = self.sim.queue_position_airborne(
                             alt_ft=alt, speed_kts=ias, lat=lat, lon=lon,
-                            hdg_deg=hdg, pitch_deg=0.0, bank_deg=0.0,
+                            hdg_deg=hdg, pitch_deg=pitch, bank_deg=-bank,
                             on_ground=on_ground
                         )
                         if positioned is False:
                             raise RuntimeError('Aircraft position initialization failed')
+                    if on_ground:
+                        if self.ground_brake is None:
+                            raise RuntimeError('Ground parking brake verification is unavailable')
+                        self.phase = 'GROUND_BRAKE'
+                        self.details = 'Engaging and verifying parking brake on the ground...'
+                        if hasattr(self.sim, 'unpause_sim'):
+                            self.sim.unpause_sim()
+                        return
                     if not hasattr(self.sim, 'set_initial_throttle') or not self.sim.set_initial_throttle(throttle):
                         raise RuntimeError('Initial throttle command failed')
 
@@ -353,28 +487,57 @@ class AutomaticControl:
                 measured = _number(fresh, 'engine_throttle_percent', 'throttle1')
                 initial = self.context.get('initial_conditions', {})
                 target = float(initial.get('throttle', 0.0))
-                if not math.isfinite(measured) or abs(measured - target) > 1.0:
-                    readback = f'{measured:.1f}%' if math.isfinite(measured) else 'N/A'
-                    self.details = f'Waiting for throttle readback: requested {target:.1f}%, measured {readback}'
-                    return
+                elapsed_init = now - getattr(self, 'sim_advanced_at', now)
+
+                mismatches = []
+                if math.isfinite(measured) and abs(measured - target) > 2.0:
+                    mismatches.append(f'throttle requested {target:.1f}%, measured {measured:.1f}%')
+                elif not math.isfinite(measured):
+                    mismatches.append('throttle not finite')
+
                 if not initial.get('on_ground', True):
                     ias = _number(fresh, 'airspeed_indicated', 'indicated_airspeed')
                     alt = _number(fresh, 'indicated_altitude', 'pressure_alt')
-                    if (not math.isfinite(ias) or not math.isfinite(alt)
-                            or abs(ias - float(initial.get('ias_kt', 0.0))) > 10.0
-                            or abs(alt - float(initial.get('alt_ft', 755.0))) > 100.0):
-                        self.details = 'Waiting for initialized airspeed and altitude readback...'
-                        return
+                    target_ias = float(initial.get('ias_kt', 0.0))
+                    target_alt = float(initial.get('alt_ft', 755.0))
+                    if not math.isfinite(ias) or abs(ias - target_ias) > 15.0:
+                        mismatches.append(f'airspeed requested {target_ias:.1f} kt, measured {ias:.1f} kt')
+                    if not math.isfinite(alt) or abs(alt - target_alt) > 150.0:
+                        mismatches.append(f'altitude requested {target_alt:.0f} ft, measured {alt:.0f} ft')
+
+                if mismatches:
+                    if elapsed_init > 15.0:
+                        raise RuntimeError(f'Prepar3D initialization readback timed out: {", ".join(mismatches)}')
+                    self.details = f'Waiting for simulator initialization readback: {", ".join(mismatches)}'
+                    return
 
                 # Initialization complete and verified. Controls untouched.
-                if hasattr(self.sim, 'pause_sim'):
-                    try:
-                        self.sim.pause_sim()
-                    except Exception:
-                        pass
+                self._pause_for_ready()
                 self.phase = 'READY'
                 self.stage = 'READY TO RECORD'
                 self.details = f"Ready to record {self.axis_name}: Center -> Limits -> Center sweep"
+                return
+
+            if self.phase == 'GROUND_BRAKE':
+                if now >= self.deadline:
+                    raise RuntimeError('Timed out waiting for parking brake ON and stationary ground readback')
+                if not self.sim.is_connected():
+                    raise RuntimeError('P3D disconnected during parking brake verification')
+                sample = self.brake_reader.poll()
+                if sample:
+                    self.latest_reader_sample = sample
+                if not self.ground_brake.verify(sample, now):
+                    return
+                throttle = float(self.context.get('initial_conditions', {}).get('throttle', 0.0))
+                if not self.sim.set_initial_throttle(throttle):
+                    raise RuntimeError('Initial throttle command failed')
+                if hasattr(self.sim, 'unpause_sim'):
+                    self.sim.unpause_sim()
+                self.initialized = True
+                self.initial_sequence = self.sim.get_telemetry_sequence()
+                if self.initial_sequence < 0:
+                    raise RuntimeError('Fresh simulator telemetry sequence is unavailable')
+                self.phase = 'CONNECT'
                 return
 
             if self.phase == 'READY':
@@ -503,6 +666,8 @@ class AutomaticControl:
                     'Rudder Surface (rad)': float(self.latest_sim.get('rudder_deflection', 0.0) or 0.0),
                     'Motion Segment': seg_name,
                 }
+                if not self.rows:
+                    row.update(measured_control_fields(self.brunner, exclude_axis=self.axis_mask))
                 self.rows.append(row)
 
                 # Sequence returns to center and completes automatically
@@ -558,6 +723,7 @@ def run(context: Dict[str, Any], publish: Any, *,
         sim_factory=None, brunner_factory=None, sleep=time.sleep) -> int:
     """Worker process loop for Automatic Static Control tests."""
     sim = None
+    brake_reader = None
     brunner = None
     thread = None
     controller = None
@@ -596,7 +762,11 @@ def run(context: Dict[str, Any], publish: Any, *,
         else:
             brunner = brunner_factory()
 
-        controller = AutomaticControl(context, sim, brunner, publish)
+        if context.get('initial_conditions', {}).get('on_ground', True):
+            from interfaces.engine_measurements import Measurements
+            root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[1]
+            brake_reader = Measurements(root / 'bridge/bin/qtg_simconnect.dll')
+        controller = AutomaticControl(context, sim, brunner, publish, brake_reader=brake_reader)
         controller.emit()
 
         directory = Path(context.get('command_directory', ''))
@@ -639,6 +809,8 @@ def run(context: Dict[str, Any], publish: Any, *,
         return 1
 
     finally:
+        if brake_reader:
+            brake_reader.close()
         if brunner and hasattr(brunner, 'close'):
             try:
                 brunner.close()

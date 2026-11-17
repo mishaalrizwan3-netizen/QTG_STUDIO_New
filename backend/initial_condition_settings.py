@@ -47,7 +47,7 @@ def catalog_defaults(spec):
 
 
 def _path(root, reference):
-    if not re.fullmatch(r'[0-9]+(?:\.[a-z]+)*\.\([0-9]+\)', reference):
+    if not re.fullmatch(r'[0-9]+(?:\.[a-z]+)*\.\([0-9]+[a-z]?\)', reference):
         raise ValueError('Invalid test reference')
     return Path(root) / (reference + '.json')
 
