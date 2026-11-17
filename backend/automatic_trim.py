@@ -72,9 +72,12 @@ class AutomaticTrim(AutomaticControl):
         self.init_last_up_step = 0.0
         self.init_last_pos = None
         self.init_stable_count = 0
+        self.init_max_pos = None
+        self.init_last_increase_time = None
         self.init_hold_start = None
         self.verified_nose_up_limit = None
         self.start_trim_pos = None
+        self.unpausing_until = 0.0
 
         # Recording state machine:
         # Step 3: Click Start Recording -> Begin recording actual trim position
@@ -131,10 +134,16 @@ class AutomaticTrim(AutomaticControl):
             return
         if action == 'record' and self.stage == 'READY TO RECORD':
             try:
-                self.sim.unpause_sim()
+                if hasattr(self.sim, 'unpause_sim'):
+                    self.sim.unpause_sim()
+                if hasattr(self.reader, 'discard_pending'):
+                    self.reader.discard_pending()
                 now = self.clock()
                 self.t_start = now
                 self.travel_start_time = now
+                self.last_frame_time = now
+                self.unpausing_until = now + 4.0
+                self.sequence_number = None
                 self.phase, self.stage = 'RECORD', 'RECORDING'
                 self.record_state = 'RECORDING_START'
                 self.rows = []
@@ -150,9 +159,6 @@ class AutomaticTrim(AutomaticControl):
     def step(self):
         now = self.clock()
         try:
-            if not self.sim.is_connected():
-                raise RuntimeError('P3D disconnected')
-
             if self.phase != 'RECORD':
                 if self.phase in ('DONE', 'CLOSED'):
                     return
@@ -170,10 +176,13 @@ class AutomaticTrim(AutomaticControl):
                         self.init_trim_phase = 'DRIVE_UP'
                         self.init_trim_start = now
                         self.init_last_up_step = 0.0
-                        self.init_last_pos = None
-                        self.init_stable_count = 0
+                        self.init_max_pos = None
+                        self.init_last_increase_time = None
                         self.emit()
                     return
+
+                if not self.sim.is_connected():
+                    raise RuntimeError('Sim Flight Model disconnected during initialization')
 
                 # Stage 2: Drive elevator trim to verified full nose-up limit using SimConnect
                 if self.init_trim_phase == 'DRIVE_UP':
@@ -183,16 +192,17 @@ class AutomaticTrim(AutomaticControl):
                         self.last_frame_time = now
                         pos = float(frame.get('indicator', frame.get('trim_fraction', 0.0)))
 
-                        if self.init_last_pos is not None:
-                            # Check if trim stopped moving up
-                            if pos - self.init_last_pos <= 0.0002:
-                                self.init_stable_count += 1
-                            else:
-                                self.init_stable_count = 0
-                        self.init_last_pos = pos
+                        if self.init_max_pos is None or pos > self.init_max_pos + 0.0005:
+                            self.init_max_pos = pos
+                            self.init_last_increase_time = now
 
-                        # Verified nose-up limit reached when position no longer advances upward or hits max limit
-                        if self.init_stable_count >= 5 or (self.init_last_pos is not None and pos >= 0.999):
+                        # Verified nose-up limit reached when position no longer advances upward or hits max limit (+0.999)
+                        limit_reached = (pos >= 0.999) or (
+                            (now - self.init_trim_start >= 1.0) and
+                            (self.init_last_increase_time is not None) and
+                            (now - self.init_last_increase_time >= 0.6)
+                        )
+                        if limit_reached:
                             self.verified_nose_up_limit = pos
                             self.init_trim_phase = 'WAIT_1S'
                             self.init_hold_start = now
@@ -200,7 +210,7 @@ class AutomaticTrim(AutomaticControl):
                             self.emit()
                             return
 
-                    if self.init_trim_start is not None and now - self.init_trim_start > 15.0:
+                    if self.init_trim_start is not None and now - self.init_trim_start > 25.0:
                         raise RuntimeError('Timed out setting elevator trim to full nose-up limit')
 
                     # Pulse ELEV_TRIM_UP
@@ -235,10 +245,13 @@ class AutomaticTrim(AutomaticControl):
                 return
 
             # Phase == 'RECORD'
+            if not self.sim.is_connected():
+                raise RuntimeError('Sim Flight Model disconnected during recording')
+
             frame = self.reader.poll()
             now = self.clock()
             if frame and frame.get('sequence') != self.sequence_number:
-                if not -0.05 <= now - frame['receipt_time'] <= 0.5:
+                if not -0.1 <= now - frame['receipt_time'] <= 2.0:
                     raise RuntimeError('Trim telemetry is stale')
                 if not all(math.isfinite(float(frame[k])) for k in ('trim_rad', 'indicator', 'trim_fraction', 'elevator_rad')):
                     raise RuntimeError('Trim or elevator telemetry unavailable')
@@ -297,11 +310,15 @@ class AutomaticTrim(AutomaticControl):
                         self.details = f"Step {self.step_count}: Trim DOWN sent. Waiting 1.0 s... (Trim: {pos:+.3f})"
                         return
                     else:
-                        # Trim did not move further down.
-                        # Detect if verified full nose-down limit has been reached:
+                        # Trim did not move further down on this step.
+                        self.unresponsive_steps += 1
                         total_down = self.start_trim_pos - pos
-                        if total_down >= 0.5 or pos < 0.0:
-                            # Verified full nose-down limit reached!
+
+                        # Detect if verified full nose-down limit has been reached:
+                        # Either it reached the absolute lower limit (pos <= -0.999), or
+                        # it reached the nose-down region (pos <= 0.0) having traveled down (total_down >= 0.2) and stopped advancing (unresponsive >= 2)
+                        limit_reached = (pos <= -0.999) or (pos <= 0.0 and total_down >= 0.2 and self.unresponsive_steps >= 2)
+                        if limit_reached:
                             self.verified_nose_down_limit = pos
                             self.final_trim_pos = pos
                             self.travel_end_time = now
@@ -315,16 +332,14 @@ class AutomaticTrim(AutomaticControl):
                             self.hold_start_time = now
                             self.details = f"Nose-down limit reached ({pos:+.3f}). Holding final position for 1.0 s..."
                             return
+                        elif self.unresponsive_steps >= UNRESPONSIVE_LIMIT:
+                            raise RuntimeError(f"P3D elevator trim stopped responding at position {pos:+.3f} before reaching nose-down limit")
                         else:
-                            # Trim did not respond and is not at nose-down limit
-                            self.unresponsive_steps += 1
-                            if self.unresponsive_steps >= UNRESPONSIVE_LIMIT:
-                                raise RuntimeError(f"P3D elevator trim stopped responding at position {pos:+.3f} before reaching nose-down limit")
-                            # Retry sending one trim down event
+                            # Retry sending one trim down event to verify limit vs temporary lag
                             self.events.step(DOWN)
                             self.step_sent_time = now
                             self.step_start_pos = pos
-                            self.details = f"Trim unresponsive ({self.unresponsive_steps}/{UNRESPONSIVE_LIMIT}), retrying DOWN..."
+                            self.details = f"Trim verifying limit ({self.unresponsive_steps}/{UNRESPONSIVE_LIMIT}), retrying DOWN..."
                             return
 
                 # 7. Hold final position for 1 second
@@ -340,18 +355,9 @@ class AutomaticTrim(AutomaticControl):
                     self.finish('COMPLETE', msg)
                     return
 
-            if self.last_frame_time is None:
-                if now - self.t_start > 1.0:
-                    raise RuntimeError('No fresh trim telemetry')
-                # If no frame yet right after record start, send initial step if not sent
-                if self.record_state == 'RECORDING_START':
-                    self.events.step(DOWN)
-                    self.step_count = 1
-                    self.step_sent_time = now
-                    self.record_state = 'WAIT_STEP'
-                return
-
-            if now - self.last_frame_time > 0.5:
+            # Telemetry watchdog
+            watchdog_limit = 4.0 if now <= getattr(self, 'unpausing_until', 0.0) else 2.0
+            if self.last_frame_time is not None and (now - self.last_frame_time > watchdog_limit):
                 raise RuntimeError('Trim telemetry stopped advancing')
 
             if now - self.t_start > 120.0:

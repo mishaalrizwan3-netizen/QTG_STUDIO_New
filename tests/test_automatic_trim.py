@@ -173,7 +173,7 @@ class AutomaticTrimTests(unittest.TestCase):
         self.worker.command({'action': 'record'})
         self.reader.poll.return_value = self.frame(1, 0.)
         self.worker.step()
-        self.now += 1.
+        self.now += 4.5
         with patch('reports.automatic_control_report.save', return_value=[]):
             self.worker.step()
         self.assertEqual(self.worker.result, 'FAILED')
