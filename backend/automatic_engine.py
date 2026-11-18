@@ -14,8 +14,6 @@ REFERENCES = ('1.f.(1)', '1.f.(2)')
 METHOD = 'engine_step'
 # The engine test definition and existing idle recordings use 5% lever position.
 IDLE_THROTTLE = 5.0
-START_RPM_SETTLE_SECONDS = 1.5
-START_RPM_SETTLE_RANGE = 120.0
 
 
 def selected(context):
@@ -51,7 +49,6 @@ class AutomaticEngine:
         self.idle_reapplied = False
         self.initial_idle_corrected = False
         self.initialization_running = False
-        self.start_rpm_samples = []
         from backend.parking_brake import GroundParkingBrake
         def brake_command_unavailable():
             raise RuntimeError('parking brake command is unavailable')
@@ -71,6 +68,8 @@ class AutomaticEngine:
                 self.brunner = None
         self._last_brunner_data = None
         self._next_brunner_poll = 0.0
+        from backend.pid_assist import PidAssist
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=0)
 
     def _read_brunner(self):
         if not self.brunner or not getattr(self.brunner, 'sock', None):
@@ -266,6 +265,13 @@ class AutomaticEngine:
                 engine_response_delta=100., max_receipt_age=1.5,
                 baseline_seconds=5.0, min_total_seconds=15.0, stable_seconds=3.0, rpm_tolerance=50.0))
             self.sequence.start(now)
+            if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids and self.brunner and getattr(self.brunner, 'sock', None):
+                try:
+                    self.brunner.configure_replay_mode(axis_mask=self.pid_assist.pid_axis_mask)
+                    self.brunner.write_setting(self.pid_assist.pid_axis_mask, 0x70, "B", 1)
+                    self.brunner.set_overrides(self.pid_assist.pid_axis_mask, True)
+                except Exception:
+                    pass
             self.phase, self.stage = 'RECORD', 'RECORDING BASELINE'
             self.details = 'Recording 5 seconds before the P3D throttle step'
             self.sim_advanced_at = now
@@ -383,25 +389,12 @@ class AutomaticEngine:
                 if throttle_mismatch:
                     mismatches.append(f'throttle {self.cfg["throttle"]:g}% (measured {frame["throttle"]:.1f}%)')
                 if mismatches:
-                    self.start_rpm_samples.clear()
                     self.details = 'Waiting for: ' + ', '.join(mismatches)
                     if now >= self.deadline:
                         raise RuntimeError(self.details)
                     return
                 if frame['rpm'] < 300:
                     raise RuntimeError('A running engine is required; start the engine before Automatic Testing')
-                self.start_rpm_samples.append((now, frame['rpm']))
-                self.start_rpm_samples = [(stamp, rpm) for stamp, rpm in self.start_rpm_samples
-                                          if stamp >= now - 2.0]
-                settled = (len(self.start_rpm_samples) >= 3
-                           and now - self.start_rpm_samples[0][0] >= START_RPM_SETTLE_SECONDS
-                           and max(rpm for _, rpm in self.start_rpm_samples)
-                           - min(rpm for _, rpm in self.start_rpm_samples) <= START_RPM_SETTLE_RANGE)
-                if not settled:
-                    self.details = 'Waiting for engine RPM to settle before recording'
-                    if now >= self.deadline:
-                        raise RuntimeError(self.details)
-                    return
                 # Initial conditions verified. Pause P3D and declare READY TO RECORD.
                 self.sim.pause_sim()
                 if not self.sim.wait_for_paused(3.0):
@@ -451,6 +444,11 @@ class AutomaticEngine:
                 h_agl = frame.get('height_agl_ft')
                 if h_agl is None and sim_tel:
                     h_agl = sim_tel.get('radar_alt')
+
+                if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids:
+                    tel = dict(sim_tel or {})
+                    tel.update(frame or {})
+                    self.pid_assist.update(now, tel, self.brunner)
 
                 row = {
                     'Time (s)': now - self.sequence.events['recording_start'],
@@ -512,6 +510,11 @@ class AutomaticEngine:
     def close(self):
         if self.brunner and getattr(self.brunner, 'sock', None):
             try:
+                pid_mask = getattr(getattr(self, 'pid_assist', None), 'pid_axis_mask', 0)
+                if pid_mask:
+                    self.brunner.write_setting(pid_mask, 0x70, "B", 0)
+                    self.brunner.set_overrides(pid_mask, False)
+                    self.brunner.set_position_forwarding()
                 self.brunner.sock.close()
             except Exception:
                 pass

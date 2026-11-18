@@ -131,7 +131,25 @@ class CommonEngineTests(unittest.TestCase):
             window.preparation_thread.join(timeout=2)
         apply.assert_called_once_with(window,cfg)
         window.p3d.set_position_airborne.assert_not_called()
+        window.p3d.pause_sim.assert_called_once()
+        window.p3d.wait_for_paused.assert_called_once_with(3.0)
         self.assertIn('5000',window.sig_update_stage.emit.call_args.args[1])
+
+    def test_manual_entry_blocks_ready_when_final_pause_is_not_confirmed(self):
+        import threading
+        base=engine.load_base()
+        cfg=dict(alt_ft=5000,ias_kt=95,lat=31.5,lon=73.25,flaps=1,throttle=65,temperature_c=25)
+        sim=Mock()
+        sim.is_connected.return_value=True
+        sim.wait_for_paused.return_value=False
+        window=SimpleNamespace(manual_initial_conditions=cfg,stop_worker_event=threading.Event(),
+            _update_stage_ui=Mock(),sig_update_stage=Mock(),brunner=Mock(),p3d=sim)
+        with patch.object(engine,'apply_manual_conditions',return_value={'pressure_alt':5000}):
+            base.SuperMushakLoggerApp.start_manual_test(window)
+            window.preparation_thread.join(timeout=2)
+        self.assertFalse(window.preparation_thread.is_alive())
+        self.assertEqual(window.sig_update_stage.emit.call_args.args[0],base.STAGE_CONNECTION_ERROR)
+        self.assertIn('did not confirm pause',window.sig_update_stage.emit.call_args.args[1])
 
     def test_live_altitude_displays_position_even_when_paused_instrument_is_stale(self):
         base=engine.load_base()

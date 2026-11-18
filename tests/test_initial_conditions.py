@@ -168,7 +168,8 @@ class PanelTest(unittest.TestCase):
         root.withdraw()
         try:
             with tempfile.TemporaryDirectory() as tmp_root, \
-                 patch.object(main, 'RESULTS_ROOT', Path(tmp_root)):
+                 patch.object(main, 'RESULTS_ROOT', Path(tmp_root)), \
+                 patch.object(main, 'TEST_ADMIN_PASSWORD', 'test-password'):
                 host = SimpleNamespace(settings_panel=tk.Frame(root), _work_canvas=tk.Canvas(root),
                                        _test_settings={}, recording_active=False, p3d_paused=False)
                 host._register_scroll_area = lambda canvas: None

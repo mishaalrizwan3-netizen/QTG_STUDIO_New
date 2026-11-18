@@ -146,6 +146,13 @@ class AutomaticTrim(AutomaticControl):
                 self.last_frame_time = now
                 self.unpausing_until = now + 4.0
                 self.sequence_number = None
+                if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids and self.brunner and getattr(self.brunner, 'sock', None):
+                    try:
+                        self.brunner.configure_replay_mode(axis_mask=self.pid_assist.pid_axis_mask)
+                        self.brunner.write_setting(self.pid_assist.pid_axis_mask, 0x70, "B", 1)
+                        self.brunner.set_overrides(self.pid_assist.pid_axis_mask, True)
+                    except Exception:
+                        pass
                 self.phase, self.stage = 'RECORD', 'RECORDING'
                 self.record_state = 'RECORDING_START'
                 self.rows = []
@@ -277,6 +284,9 @@ class AutomaticTrim(AutomaticControl):
                 }
                 row.update(measured_control_fields(self.brunner))
                 self.rows.append(row)
+
+                if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids:
+                    self.pid_assist.update(now, self.latest_sim, self.brunner)
 
                 if self.start_trim_pos is None:
                     self.start_trim_pos = pos

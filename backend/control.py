@@ -2,7 +2,7 @@
 
 
 def validate_method(reference, method):
-    if method not in ("replay", "pid", "engine_step", "static_control", "pitch_trim", "stall", "power_dynamics"):
+    if method not in ("replay", "pid", "multi_pid", "engine_step", "static_control", "pitch_trim", "stall", "power_dynamics"):
         raise ValueError("Unknown Automatic control method")
     if method == "engine_step" and reference not in ("1.f.(1)", "1.f.(2)"):
         raise ValueError("Engine throttle step is supported only for engine tests.")

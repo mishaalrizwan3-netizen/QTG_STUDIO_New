@@ -283,7 +283,7 @@ from backend.artifacts import test_directory, named_result
 from backend.initializer import apply_manual_conditions
 
 
-def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False):
+def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False, active_pids=None, target_heading_mag=None):
     if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
     if control_method == 'engine_step' and mode != 'auto':
         raise ValueError('Engine throttle step requires Automatic Testing')
@@ -314,8 +314,11 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
         initial_conditions = enforce(spec.reference, initial_conditions)
     brunner_root()
     validate_method(spec.reference, control_method)
+    if control_method == 'multi_pid':
+        from backend.pid_selection import validate as validate_pid_selection
+        validate_pid_selection(spec.reference, mode, active_pids)
     from backend.engine_initialization_adapter import requested
-    universal_auto = mode == 'auto' and control_method not in ('engine_step', 'pitch_trim', 'stall', 'power_dynamics') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
+    universal_auto = mode == 'auto' and control_method not in ('engine_step', 'pitch_trim', 'stall', 'power_dynamics', 'multi_pid') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
     if mode=='auto' and (control_method=='replay' or universal_auto):
         if not reference:
             raise ValueError('Select a Manual reference CSV before Universal Automatic initialization; GUI targets cannot substitute.')
@@ -333,6 +336,9 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
              'initial_conditions':initial_conditions,'initial_condition_overrides':initial_condition_overrides,'selected_graphs':selected_graphs,'reference_csv':reference, 'control_method':control_method, 'pid_conditions':pid_conditions, 'validation_csv':validation_csv, 'duration_s':duration_s, 'command_directory':str(output/(token+'_commands')), 'status_file':str(output/(token+'_status.json')),
              'stop_file':str(output/(token+'_stop')), 'results_root':str(output.parent), 'result_directory':str(test_directory(output.parent,spec.reference,spec.title)),
              'initialization_policy':'operator settings for Manual/PID; selected Manual t0 for Recorded Replay'}
+    if active_pids:
+        context['active_pids'] = dict(active_pids)
+        context['target_heading_mag'] = float(target_heading_mag if target_heading_mag is not None else initial_conditions['heading_deg'])
     if configuration_revision is not None:
         context['configuration_revision'] = configuration_revision
     if operator_initiated_universal_manual is True and spec.reference == '1.f.(2)' and mode == 'manual':
@@ -368,6 +374,8 @@ from backend.initializer import configure_test_extension
 
 
 def universal_initialization_enabled(window):
+    if getattr(window, '_control_method', None) == 'multi_pid':
+        return False
     from backend.engine_initialization_adapter import requested
     context = getattr(window, '_session_context', {})
     return (context.get('universal_initialization_enabled', False) is True
@@ -407,6 +415,14 @@ def _initialize_mode(window, mode, reference=None):
     """Dispatch only after both connections are available. No duplicate prep code."""
     if not window.p3d or not window.p3d.is_connected() or not window.brunner.sock:
         raise RuntimeError('P3D and BRUNNER must both be connected before initialization.')
+    if mode == 'auto' and getattr(window, '_control_method', None) == 'multi_pid':
+        from backend.multi_pid_runner import prepare
+        configure_test_extension(window, None)
+        window._prepared = False
+        window._preparing = True
+        window.manual_initial_conditions = window._session_context['initial_conditions']
+        window.report_initial_conditions = window.manual_initial_conditions
+        return prepare(window, window._base_module)
     window._prepared=False
     window._preparing=True
     context=getattr(window,'_session_context',{})
@@ -515,6 +531,8 @@ def worker_class(base,context,publish):
             self._control_method=context.get('control_method','replay')
             self.control_method=self._control_method
             self.validation_csv=context.get('validation_csv')
+            if self._control_method == 'multi_pid':
+                self.pid_conditions = context.get('pid_conditions') or {'target_ias': 80.0}
             self.manual_initial_conditions=context.get('initial_conditions')
             self.report_graphs=context.get('selected_graphs')
             self.report_initial_conditions=context.get('initial_conditions')
@@ -750,6 +768,9 @@ def worker_class(base,context,publish):
             if stage==base.STAGE_CONNECTED_READY and self._preparing:
                 self._prepared=True
                 self._preparing=False
+                if self._control_method == 'multi_pid':
+                    self.test_mode = 'auto'
+                    self.auto_t0_snapshot = getattr(self, 'manual_t0_snapshot', None)
                 mark(self, 'READY')
             elif stage in (base.STAGE_AUTO_BLOCKED,base.STAGE_CONNECTION_ERROR,base.STAGE_STOPPED_BY_USER):
                 self._prepared=False
@@ -758,6 +779,19 @@ def worker_class(base,context,publish):
             self._publish()
 
         def arm_recording(self):
+            if self._control_method == 'multi_pid':
+                if (getattr(self, '_multi_pid_started', False) or not self._prepared
+                        or self.stop_worker_event.is_set() or self.is_recording):
+                    return
+                import threading
+                self._multi_pid_started = True
+                for name in ('rec_time', 'p_pos_buf', 'r_pos_buf', 'y_pos_buf',
+                             'p_force_buf', 'r_force_buf', 'y_force_buf', 'p3d_tele_buf',
+                             'applied_force_buf', 'virtual_force_buf', 'replay_command_buf'):
+                    getattr(self, name).clear()
+                self.worker_thread = threading.Thread(target=self._auto_replay_loop, daemon=True)
+                self.worker_thread.start()
+                return
             # Also guard the inherited Qt button/spacebar entry, not just IPC.
             if universal_initialization_enabled(self):
                 from backend.engine_initialization_adapter import initialization_only
@@ -775,6 +809,8 @@ def worker_class(base,context,publish):
 
         def handle_command(self,command):
             action=command['action']
+            if action == 'record' and self._control_method == 'multi_pid':
+                return  # PID runner starts after preparation and owns its recording gate.
             if action == 'invalidate_initialization':
                 session = self._session_context
                 # Ignore delayed notifications from an older GUI snapshot/session.
@@ -927,10 +963,14 @@ def worker_class(base,context,publish):
                     return
                 mode=command['mode']
                 method=command.get('control_method','replay')
-                if method not in ('replay','pid'): raise ValueError('Unknown Automatic control method')
+                if method not in ('replay','pid','multi_pid'): raise ValueError('Unknown Automatic control method')
+                if method == 'multi_pid':
+                    from backend.pid_selection import validate as validate_pid_selection
+                    validate_pid_selection(command.get('test_reference', context['test_reference']), mode,
+                                           command.get('active_pids'))
                 if method=='pid' and command.get('test_reference',context['test_reference'])!='1.c.(1)': raise ValueError('PID is supported only for normal climb.')
                 from backend.engine_initialization_adapter import requested
-                universal_auto = mode == 'auto' and requested(dict(test_reference=command.get('test_reference', context['test_reference']), mode=mode, control_method=method))
+                universal_auto = mode == 'auto' and method != 'multi_pid' and requested(dict(test_reference=command.get('test_reference', context['test_reference']), mode=mode, control_method=method))
                 reference=validate_reference(command['reference_csv']) if mode=='auto' and (method=='replay' or universal_auto) else None
                 duration=validate_duration(command.get('duration_s',75))
                 if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
@@ -977,9 +1017,18 @@ def worker_class(base,context,publish):
                 sys.modules['qtg_common_engine']._active_test_reference = command.get('test_reference', context.get('test_reference'))
                 self._control_method=method
                 self.control_method=method
+                self._multi_pid_started = False
+                if method == 'multi_pid':
+                    self.pid_conditions = command.get('pid_conditions') or {'target_ias': 80.0}
                 self.validation_csv=command.get('validation_csv')
                 context.update(control_method=method,pid_conditions=command.get('pid_conditions'),validation_csv=command.get('validation_csv'),mode=mode,reference_csv=reference,test_reference=command.get('test_reference',context['test_reference']),
                                title=command.get('title',context['title']),duration_s=duration)
+                if method == 'multi_pid':
+                    context['active_pids'] = dict(command['active_pids'])
+                    context['target_heading_mag'] = float(command.get('target_heading_mag', conditions['heading_deg']))
+                else:
+                    context.pop('active_pids', None)
+                    context.pop('target_heading_mag', None)
                 context['operator_initiated_universal_manual'] = (command.get('operator_initiated_universal_manual') is True and context['test_reference'] == '1.f.(2)' and mode == 'manual')
                 context['configuration_revision'] = command.get('configuration_revision')
                 context.pop('gui_configuration_invalidated', None)
@@ -997,6 +1046,9 @@ def worker_class(base,context,publish):
                     initialize_mode(self,mode,reference)
 
         def _auto_replay_loop(self):
+            if self._control_method == 'multi_pid':
+                from backend.multi_pid_runner import loop
+                return loop(self, base)
             if self._control_method=='pid':
                 from qtg_climb_pid import loop
                 return loop(self,base)
@@ -1004,6 +1056,8 @@ def worker_class(base,context,publish):
 
         def _on_ui_timer_tick(self):
             # Keep the existing status refresh, but do not hide PID feedback failures.
+            if self._control_method == 'multi_pid' and self._prepared and not self.stop_worker_event.is_set():
+                self.arm_recording()
             if universal_initialization_enabled(self):
                 self._poll_universal_initialization()
             try:
@@ -1110,6 +1164,9 @@ def worker_class(base,context,publish):
             if getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None):
                 self.current_stage=base.STAGE_CONNECTION_ERROR
                 self._stage_details='Incomplete PID test: '+self.pid_fault
+            if getattr(self, '_control_method', 'replay') == 'multi_pid' and getattr(self, 'multi_pid_fault', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Incomplete selected PID test: ' + self.multi_pid_fault
             if any(path.lower().endswith('.pdf') for path in self._outputs) and not (context.get('test_reference') == '2.c.(8b)' and getattr(self, '_stall_measurement_error', None)) and not (context.get('test_reference') == '2.a.(8)' and getattr(self, '_buc_measurement_error', None)) and not (getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None)):
                 self.lbl_rec_status.setText('COMPLETED - CSV and PDF reports saved')
             if context.get('test_reference') == '1.f.(2)':

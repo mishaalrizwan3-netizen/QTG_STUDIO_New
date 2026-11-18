@@ -110,6 +110,9 @@ class AutomaticPowerDynamics:
         self.result, self.closed = None, False
         self.last_sample_time = None
         self.baseline_anchor = None
+        from backend.pid_assist import PidAssist
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=0)
+        self.brunner = context.get('brunner')
 
     def status(self):
         frame = self.latest or {}
@@ -153,8 +156,9 @@ class AutomaticPowerDynamics:
                 self.start_time = self.clock()
                 self.last_sim_advance = self.start_time
                 self.last_sim_time = self.latest.get('sim_time')
+                self._last_unpause_retry = self.start_time
                 self.phase, self.stage = 'RECORD', 'RECORDING BASELINE'
-                self.details = '5 s baseline before the power step; no pitch/IAS/altitude PID'
+                self.details = '5 s baseline before the power step; uncontrolled free response'
         self.emit()
 
     def _ensure_live(self, frame, now):
@@ -323,8 +327,19 @@ class AutomaticPowerDynamics:
                 if self.last_sim_time is not None and frame['sim_time'] > self.last_sim_time:
                     self.last_sim_advance = now
                     self.last_sim_time = frame['sim_time']
-                elif self.last_sim_advance is not None and now - self.last_sim_advance > 2.0:
-                    raise RuntimeError('P3D is paused or simulation time stopped advancing')
+                else:
+                    if now - getattr(self, '_last_unpause_retry', 0.0) >= 0.5:
+                        self._last_unpause_retry = now
+                        if hasattr(self.sim, 'unpause_sim'):
+                            try:
+                                self.sim.unpause_sim()
+                            except Exception:
+                                pass
+                    if self.last_sim_advance is not None and now - self.last_sim_advance > 8.0:
+                        raise RuntimeError('P3D is paused or simulation time stopped advancing')
+
+                if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids:
+                    self.pid_assist.update(now, frame, getattr(self, 'brunner', None))
 
                 if frame.get('on_ground') == 1:
                     raise RuntimeError('Aircraft is on the ground; airborne free-response test cannot continue')

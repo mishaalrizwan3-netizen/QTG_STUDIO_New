@@ -239,12 +239,6 @@ class EngineIntegrationTests(unittest.TestCase):
         self.sim.unpause_sim.assert_called_once()
         self.now += .1
         worker.step(self.frame(worker, throttle=5))
-        self.assertEqual(worker.phase, 'PREPARE')
-        self.assertIn('RPM to settle', worker.details)
-        self.now += .75
-        worker.step(self.frame(worker, throttle=5))
-        self.now += .8
-        worker.step(self.frame(worker, throttle=5))
         self.assertEqual(worker.phase, 'READY')
         self.assertEqual(worker.stage, 'READY TO RECORD')
         worker.command(dict(action='record'))
@@ -288,25 +282,15 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertIn('temperature_c', worker.details)
         self.now += .1
         worker.step(self.frame(worker, throttle=5, temperature_c=15))
-        self.assertEqual(worker.phase, 'PREPARE')
-        self.now += .75
-        worker.step(self.frame(worker, throttle=5, temperature_c=15))
-        self.now += .8
-        worker.step(self.frame(worker, throttle=5, temperature_c=15))
         self.assertEqual(worker.phase, 'READY')
 
-    def test_waits_for_engine_rpm_to_settle_before_recording(self):
+    def test_initialization_does_not_wait_for_engine_rpm_to_settle(self):
         worker = self.worker()
         worker.step(self.frame(worker, throttle=5, rpm=2700))
         self.now = 1.
         worker.step(self.frame(worker, throttle=5, rpm=2700))
-        for stamp, rpm in ((2., 2700.), (2.5, 2000.), (3., 1500.),
-                           (4., 1540.)):
-            self.now = stamp
-            worker.step(self.frame(worker, throttle=5, rpm=rpm))
-            self.assertEqual(worker.phase, 'PREPARE')
-        self.now = 5.
-        worker.step(self.frame(worker, throttle=5, rpm=1550.))
+        self.now = 2.
+        worker.step(self.frame(worker, throttle=5, rpm=2000.))
         self.assertEqual(worker.stage, 'READY TO RECORD')
         self.sim.pause_sim.assert_called()
 

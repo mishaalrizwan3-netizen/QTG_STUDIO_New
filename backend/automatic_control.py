@@ -154,6 +154,9 @@ class AutomaticControl:
         self.startup_timeout = float(context.get('startup_timeout', 120.0))
         self.deadline = clock() + self.startup_timeout
 
+        from backend.pid_assist import PidAssist
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=self.axis_mask if self.live_hardware else 0)
+
         self.phase = 'CONNECT'
         self.stage = 'Connecting'
         self.details = f'Establishing link with Sim Flight Model and CLS2sim ({self.axis_name} Axis)...'
@@ -296,11 +299,12 @@ class AutomaticControl:
         """Immediately ceases QTG movement commands without initiating an automatic centering movement."""
         # On fault or emergency stop, cease QTG movement commands immediately.
         # Do not command centering (0.0)!
-        if self.brunner and self.live_hardware:
+        total_mask = (self.axis_mask if self.live_hardware else 0) | getattr(self.pid_assist, 'pid_axis_mask', 0)
+        if self.brunner and total_mask:
             try:
-                # Disengage Autopilot directly on target axis without moving to 0
-                self.brunner.write_setting(self.axis_mask, 0x70, "B", 0)
-                self.brunner.set_overrides(self.axis_mask, False)
+                # Disengage Autopilot directly without moving to 0
+                self.brunner.write_setting(total_mask, 0x70, "B", 0)
+                self.brunner.set_overrides(total_mask, False)
                 self.brunner.set_position_forwarding()
             except Exception:
                 pass
@@ -313,14 +317,13 @@ class AutomaticControl:
             self.finish('FAILED', 'Sim Flight Model connection required to record')
             return
 
-        # Verify BRUNNER control ownership and engage Autopilot exclusively on target axis
-        if self.live_hardware and self.brunner and getattr(self.brunner, 'sock', None):
+        # Engage Autopilot on target test axis + active PID assist axes
+        total_mask = (self.axis_mask if self.live_hardware else 0) | getattr(self.pid_assist, 'pid_axis_mask', 0)
+        if total_mask and self.brunner and getattr(self.brunner, 'sock', None):
             try:
-                # Configure replay mode exclusively for the target axis (sets overrides, virtual force, AP speed/force, AP ON)
-                self.brunner.configure_replay_mode(axis_mask=self.axis_mask)
-                # Explicitly confirm Autopilot ON (Setting 0x70, UInt8: 1)
-                self.brunner.write_setting(self.axis_mask, 0x70, "B", 1)
-                self.brunner.set_overrides(self.axis_mask, True)
+                self.brunner.configure_replay_mode(axis_mask=total_mask)
+                self.brunner.write_setting(total_mask, 0x70, "B", 1)
+                self.brunner.set_overrides(total_mask, True)
                 self.ownership_verified = True
             except Exception as exc:
                 self.finish('FAILED', f"Brunner Autopilot engagement failed: {exc}")
@@ -558,6 +561,10 @@ class AutomaticControl:
                 if self.live_hardware and self.brunner and self.ownership_verified:
                     self.brunner.write_setting(self.axis_mask, 0x80, "f", target_pos)
 
+                # Update PID Assist for active non-owned axes
+                if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids:
+                    self.pid_assist.update(now, self.latest_sim, self.brunner)
+
                 # Simulated response if Brunner physical feedback is not reading movement in offline check
                 meas_pos = self.latest_brunner.get('pos', target_pos)
                 if not self.live_hardware or not self.latest_brunner:
@@ -690,10 +697,11 @@ class AutomaticControl:
         self.details = reason
 
         # Release Brunner overrides safely without commanding a new position
-        if self.brunner and self.live_hardware:
+        total_mask = (self.axis_mask if self.live_hardware else 0) | getattr(self.pid_assist, 'pid_axis_mask', 0)
+        if self.brunner and total_mask:
             try:
-                self.brunner.write_setting(self.axis_mask, 0x70, "B", 0)
-                self.brunner.set_overrides(self.axis_mask, False)
+                self.brunner.write_setting(total_mask, 0x70, "B", 0)
+                self.brunner.set_overrides(total_mask, False)
                 self.brunner.set_position_forwarding()
             except Exception:
                 pass

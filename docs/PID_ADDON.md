@@ -1,0 +1,7 @@
+# Separate PID console
+
+Run `python pid_launcher.py` from the repository root, or double-click `RUN_PID_ADDON.bat` on the simulator PC. This console is separate from the existing QTG Studio Test Settings and test engine. It adds new source files only; it does not replace the current automatic or manual tests.
+
+Prepare the aircraft in Prepar3D first and close the main QTG app so only one process owns BRUNNER. Select any combination of Airspeed (pitch), Bank (roll), and Yaw (heading/rudder), enter targets and recording duration, then press **Start PID**. The controller waits for five continuous seconds of stable measurements before it starts recording. **Stop PID** stops control and releases its owned axes. The console pauses P3D when the PID run ends. CSV and PDF outputs go to `PID_Addon` under `QTG_RESULTS_ROOT`, or under `D:/QTG_Test_Results` if that variable is unset, matching the current source app default.
+
+This standalone console does not initialize the aircraft or run the existing test catalog. The supplied PID algorithms and transport are from `feature/integrated-pids`; the launcher uses the current repository's SimConnect and BRUNNER interfaces. The teammate branch's GUI, engine, initialization, and graph edits were not copied. Offline tests cover the PID code and launcher cleanup, but P3D/CLS2Sim behavior still requires supervised simulator validation before use for test evidence.

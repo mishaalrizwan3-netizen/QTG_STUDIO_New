@@ -604,7 +604,9 @@ class SuperMushakLoggerApp(QMainWindow):
                 configured=getattr(self,"manual_initial_conditions",None)
                 if configured is not None:
                     from qtg_common_engine import apply_manual_conditions
+                    from backend.ready_pause import confirm_ready_pause
                     actual=apply_manual_conditions(self,configured)
+                    confirm_ready_pause(self.p3d)
                     if airflow_enabled(self):
                         self.sig_update_stage.emit(STAGE_CONNECTED_READY,
                             f"Ready for Manual Recording. Airflow verified: IAS {actual['airspeed_indicated']:.2f} kt, "
@@ -647,6 +649,8 @@ class SuperMushakLoggerApp(QMainWindow):
 
 
                 # Ready for recording (signal dispatched to main UI thread)
+                from backend.ready_pause import confirm_ready_pause
+                confirm_ready_pause(self.p3d)
                 print("[Manual Prep] Initial conditions set and aircraft ready for recording.", flush=True)
                 self.sig_update_stage.emit(STAGE_CONNECTED_READY, "")
             except Exception as e:
@@ -935,6 +939,8 @@ class SuperMushakLoggerApp(QMainWindow):
                 print(f"[Auto Prep Step 5/5] Ready for Replay! P3D paused: MSL={tele.get('pressure_alt', 0):.0f}ft, indicated={tele.get('indicated_altitude', 0):.0f}ft, IAS={tele.get('airspeed_indicated', 0):.1f}kt. Stick: P={chk_p:+.3f}, R={chk_r:+.3f}, Y={chk_y:+.3f}.", flush=True)
 
                 # Ready for recording (signal dispatched to main UI thread)
+                from backend.ready_pause import confirm_ready_pause
+                confirm_ready_pause(self.p3d)
                 _observe_weather(self, 'final_initialization_readiness', tele)
                 self.sig_update_stage.emit(STAGE_CONNECTED_READY, "")
             except Exception as e:

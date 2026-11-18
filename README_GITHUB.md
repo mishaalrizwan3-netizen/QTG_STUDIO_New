@@ -18,7 +18,7 @@ The full application additionally requires a compatible Prepar3D installation an
 
 For the existing deployment spec, the required bridge files are `p3d_bridge.dll`, `bridge/bin/qtg_p3d_bridge.dll`, `bridge/bin/qtg_simconnect.dll` and `interfaces/brunner_base/native/bin/p3d_bridge_engine_init_v1517.dll`. Verify their hashes and compatibility before deployment. Respect the applicable licensing terms for all simulator and reference materials.
 
-For a sanitized collaboration snapshot, set `QTG_TEST_ADMIN_PASSWORD` locally before starting the application. Do not commit the value or put it in a shared script. This applies to this public copy; set the variable in your own environment and never commit its value.
+Test Settings prompts for a local administrator password the first time it is opened on a PC. The app stores a salted password hash under the current Windows user's Local AppData folder. An existing `QTG_TEST_ADMIN_PASSWORD` environment variable takes precedence if set before the application starts. Do not commit passwords or put them in a shared script.
 
 ## Run and test
 

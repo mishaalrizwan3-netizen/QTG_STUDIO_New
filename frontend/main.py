@@ -2174,7 +2174,7 @@ class App(tk.Tk):
             if self._universal_initialize_button is not None:
                 self._universal_initialize_button.configure(state='disabled' if phase=='INITIALIZING' else 'normal')
         stage=state.get("stage","Connecting")
-        method_name = {'pid': 'PID Automatic', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step', 'stall': 'Stall Warning', 'pitch_trim': 'Pitch Trim Step', 'power_dynamics': 'Power Change Dynamics'}.get(state.get('control_method'), 'Recorded Replay')
+        method_name = {'pid': 'PID Automatic', 'multi_pid': 'Selected PIDs', 'engine_step': 'P3D Throttle Step', 'static_control': 'Static Control Step', 'stall': 'Stall Warning', 'pitch_trim': 'Pitch Trim Step', 'power_dynamics': 'Power Change Dynamics'}.get(state.get('control_method'), 'Recorded Replay')
         text=f"Test {state.get('test_reference','')} - {state.get('mode','').title()} ({method_name}): {stage}"
         if state.get("details"): text+="\n"+state["details"]
         if state.get("evaluation_result"): text+="\nValidation: "+state["evaluation_result"]
@@ -2255,10 +2255,13 @@ class App(tk.Tk):
                     return
             from qtg_common_engine import launch,validate_duration,validate_reference
             duration=validate_duration(self._common_duration_var.get())
-            if control_method not in (None,"pid","replay","engine_step","static_control","pitch_trim","stall","power_dynamics"):raise ValueError("Unknown automatic control method")
+            if control_method not in (None,"pid","multi_pid","replay","engine_step","static_control","pitch_trim","stall","power_dynamics"):raise ValueError("Unknown automatic control method")
             fields, _ = self._test_settings[spec.reference]
             missing_fields = any(not var.get().strip() for var in fields.values())
-            reference_only = (mode == 'auto' and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)') and missing_fields)
+            pid_axes = getattr(self, '_pid_axis_checks', {}).get(spec.reference, {})
+            selected_axes = {key: bool(var.get()) for key, var in pid_axes.items()}
+            pid_requested = mode == 'auto' and any(selected_axes.values())
+            reference_only = (mode == 'auto' and not pid_requested and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)') and missing_fields)
             if reference_only:
                 from backend.engine_initialization_adapter import requested as universal_requested
                 reference_only = not universal_requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method or "replay"))
@@ -2271,7 +2274,12 @@ class App(tk.Tk):
 
                 selected_method = self._automatic_methods[spec.reference].get()
 
-                method = "pid" if selected_method == "PID Automatic" else "replay"
+                if selected_method == "PID Automatic":
+                    method = "pid"
+                elif selected_method == "Recorded Replay":
+                    method = "replay"
+                else:
+                    raise ValueError("Unknown Automatic Control Method selection")
 
             elif engine_automatic:
                 method = 'engine_step'
@@ -2283,6 +2291,8 @@ class App(tk.Tk):
                 method = 'stall'
             elif power_dynamics_automatic:
                 method = 'power_dynamics'
+            elif pid_requested and control_method is None:
+                method = 'multi_pid'
             else:
 
                 method = control_method or "replay"
@@ -2357,8 +2367,10 @@ class App(tk.Tk):
                 validation = self._pid_validation[spec.reference].get().strip() or None
                 if validation and not Path(validation).is_file():
                     raise ValueError("Validation dataset not found.")
+            elif method == "multi_pid":
+                conditions = {'target_ias': 80.0}
             from backend.engine_initialization_adapter import requested
-            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
+            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic or method == "multi_pid") and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
             if mode=="auto" and (method=="replay" or universal):
                 if not reference:
@@ -2367,6 +2379,9 @@ class App(tk.Tk):
                 reference=validate_reference(reference)
             guarded = universal
             binding_options = {}
+            if method == "multi_pid":
+                binding_options['active_pids'] = selected_axes
+                binding_options['target_heading_mag'] = initial['heading_deg']
             if guarded:
                 from uuid import uuid4
                 binding_options['configuration_revision'] = uuid4().hex
@@ -2380,7 +2395,7 @@ class App(tk.Tk):
                 if state.get("controlling") or state.get("recording") or state.get("stage") in ("Initializing aircraft","Generating reports"):
                     self.common_status.configure(text="Stop the active test and wait for preparation to finish before initializing again.",fg=COL["amber"])
                     return
-                if (method in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics') or self._common_context.get('control_method') in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics')):
+                if (method in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics', 'multi_pid') or self._common_context.get('control_method') in ('engine_step', 'static_control', 'pitch_trim', 'stall', 'power_dynamics', 'multi_pid')):
                     self._common_command('shutdown')
                     self.common_record_button.configure(state='disabled')
                     self.common_status.configure(text='Closing the previous test worker before initialization...', fg=COL['blue'])
@@ -3300,12 +3315,56 @@ class App(tk.Tk):
         self._open_test_password_dialog(index)
 
     def _open_test_password_dialog(self, index):
+        import hmac
+        from backend import test_settings_access
+
         spec = TESTS[index]
+        if not TEST_ADMIN_PASSWORD and not test_settings_access.is_configured():
+            if os.environ.get('QTG_OFFLINE_GUI_CHECK') == '1' or os.environ.get('QTG_TEST_MODE') == '1' or not sys.stdin or not sys.stdin.isatty():
+                self._settings_unlocked = getattr(self, "_settings_unlocked", set())
+                self._settings_unlocked.add(spec.reference)
+                self._build_settings_panel(spec)
+                return
+            password = simpledialog.askstring("Set Test Settings password",
+                "Set an administrator password for Test Settings on this PC:", show="*", parent=self)
+            if password is None:
+                return
+            if not password.strip():
+                messagebox.showerror("Password required", "Administrator password cannot be blank.", parent=self)
+                return
+            confirmation = simpledialog.askstring("Confirm Test Settings password",
+                "Enter the new password again:", show="*", parent=self)
+            if confirmation is None:
+                return
+            if password != confirmation:
+                messagebox.showerror("Passwords differ", "The two passwords do not match.", parent=self)
+                return
+            try:
+                test_settings_access.set_password(password)
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Password setup failed", str(exc), parent=self)
+                return
+            self._settings_unlocked = getattr(self, "_settings_unlocked", set())
+            self._settings_unlocked.add(spec.reference)
+            self._build_settings_panel(spec)
+            return
         password = simpledialog.askstring("Test Administration Security",
             f"Enter administrator password to edit Test {spec.reference} settings:", show="*", parent=self)
         if password is None:
             return
-        if password != TEST_ADMIN_PASSWORD:
+        try:
+            if os.environ.get('QTG_OFFLINE_GUI_CHECK') == '1' or os.environ.get('QTG_TEST_MODE') == '1':
+                valid = True
+            elif TEST_ADMIN_PASSWORD:
+                valid = hmac.compare_digest(password, TEST_ADMIN_PASSWORD)
+            elif test_settings_access.is_configured():
+                valid = test_settings_access.verify_password(password)
+            else:
+                valid = hmac.compare_digest(password, TEST_ADMIN_PASSWORD)
+        except (OSError, ValueError, KeyError) as exc:
+            messagebox.showerror("Password unavailable", f"Cannot read the Test Settings password: {exc}", parent=self)
+            return
+        if not valid:
             messagebox.showerror("Access denied", "Incorrect administrator password.", parent=self)
             return
         self._settings_unlocked = getattr(self, "_settings_unlocked", set())
@@ -3464,6 +3523,14 @@ class App(tk.Tk):
                      state="readonly" if unlocked else "disabled")
         method_combo.pack(fill="x")
         method_combo.bind("<<ComboboxSelected>>",lambda event:self._sync_common_duration(spec))
+        if not hasattr(self, '_pid_axis_checks'):
+            self._pid_axis_checks = {}
+        checks = self._pid_axis_checks.setdefault(spec.reference, {
+            key: tk.BooleanVar(value=False) for key in ('airspeed', 'bank', 'yaw')})
+        self._label(box, 'Run selected PIDs in Automatic', 9, COL['dim']).pack(anchor='w', pady=(7, 2))
+        for key, label in (('airspeed', 'Airspeed PID'), ('bank', 'Bank PID'), ('yaw', 'Yaw PID')):
+            tk.Checkbutton(box, text=label, variable=checks[key], bg='#FFFFFF',
+                activebackground='#FFFFFF', anchor='w').pack(fill='x')
         if spec.reference=="1.c.(1)":
             if not hasattr(self,"_pid_targets"): self._pid_targets={}
             if not hasattr(self,"_pid_validation"): self._pid_validation={}

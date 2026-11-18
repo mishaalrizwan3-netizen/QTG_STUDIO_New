@@ -966,12 +966,22 @@ def _pid_report(csv_path, out_path, validation_df=None, evaluation_result="NOT E
         'roll_position':'Joystick Roll Position (mm)','roll_force':'Roll Virtual Force 0x51 (N)',
         'rudder_position':'Rudder Pedal Position (mm)','rudder_force':'Yaw Virtual Force 0x51 (N)',
         'elevator_input_norm':'Measured Elevator Input (normalised)','aileron_input_norm':'Measured Aileron Input (normalised)','rudder_input_norm':'Measured Rudder Input (normalised)',
+        'trim_position_rad':'Elevator Trim Angle (rad)', 'trim_indicator':'Elevator Trim Indicator (position)',
+        'trim_value_pct':'Elevator Trim (%)', 'trim_elevator_surface_rad':'Elevator Surface (rad)',
+        'stall_aoa':'Aircraft Angle of Attack (deg)', 'stall_warning':'Stall Warning (0/1)',
+        'stall_elevator':'Elevator Surface (rad)', 'stall_pitch_position':'BRUNNER Pitch Position (raw)',
+        'buc_throttle':'BUC Throttle Z Rotation (%)', 'buc_propeller':'BUC Propeller Slider (%)',
+        'buc_mixture':'BUC Mixture Dial (%)', 'buc_torque':'Engine Torque (ft lb)',
+        'buc_sim_propeller':'Propeller 1 Lever (%)', 'buc_sim_mixture':'Mixture 1 Position (%)',
         'titt':'Ti/Tt response analysis'}
     if selected_graphs is not None:
         chosen={mapping[key] for key in selected_graphs if key in mapping}
         groups.extend([
             ('Additional Flight and Engine Measurements',[(mapping[key],mapping[key]) for key in ('height_agl_ft','ground_speed_kt','manifold_inhg','fuel_flow_pph')]),
             ('Measured Simulator Control Inputs',[(mapping[key],mapping[key]) for key in ('elevator_input_norm','aileron_input_norm','rudder_input_norm')]),
+            ('Pitch Trim', [(mapping[key], mapping[key]) for key in ('trim_position_rad','trim_indicator','trim_value_pct','trim_elevator_surface_rad')]),
+            ('Stall Warning', [(mapping[key], mapping[key]) for key in ('stall_aoa','stall_warning','stall_elevator','stall_pitch_position')]),
+            ('Cockpit Levers', [(mapping[key], mapping[key]) for key in ('buc_throttle','buc_propeller','buc_mixture','buc_torque','buc_sim_propeller','buc_sim_mixture')]),
             ('Ti/Tt Response Analysis',[(mapping['titt'],mapping['titt'])])])
         groups=[(title,[(key,label) for key,label in channels if key in chosen]) for title,channels in groups]
         groups=[(title,channels) for title,channels in groups if channels]
@@ -1213,6 +1223,12 @@ def _get_engine_plot_module():
     return engine_module
 
 def plot_aligned_comparison(csv_path, manual_csv_path=None, output_pdf_path=None, **kwargs):
+    if kwargs.get('control_method') == 'multi_pid':
+        csv_path = Path(csv_path)
+        out_path = Path(output_pdf_path) if output_pdf_path else csv_path.with_name(csv_path.stem + '_graphs.pdf')
+        _pid_report(csv_path, out_path, selected_graphs=kwargs.get('selected_graphs'),
+                    target_ias=kwargs.get('pid_target_ias', 80), mode='pid')
+        return str(out_path)
     if _is_engine_test(csv_path, kwargs):
         try:
             engine_mod = _get_engine_plot_module()

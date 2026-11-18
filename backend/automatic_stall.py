@@ -151,7 +151,8 @@ class AutomaticStall(AutomaticControl):
             if not math.isfinite(start):
                 raise RuntimeError('Pitch control position unavailable')
             self.owned = True
-            self.brunner.configure_replay_mode(self.brunner.AXIS_PITCH)
+            total_mask = self.brunner.AXIS_PITCH | getattr(self.pid_assist, 'pid_axis_mask', 0)
+            self.brunner.configure_replay_mode(total_mask)
             self.start_pos = start
             self.position = start
             self.initial_ias, self.initial_altitude = ias, alt
@@ -340,6 +341,8 @@ class AutomaticStall(AutomaticControl):
             if self.clock() - sample['receipt_time'] > 1. or self.clock() - now > .35:
                 raise RuntimeError('Control telemetry became stale before pitch command')
             self.brunner.move_actuators(self.position, None, None)
+            if getattr(self, 'pid_assist', None) and self.pid_assist.has_active_pids:
+                self.pid_assist.update(now, data, self.brunner)
             if (self.warning_cleared_at is not None
                     and now - self.warning_cleared_at >= 2.0
                     and abs(self.position) <= NEUTRAL_TOLERANCE
@@ -356,9 +359,10 @@ class AutomaticStall(AutomaticControl):
 
     def _release_pitch(self):
         pitch_axis = self.brunner.AXIS_PITCH
-        self.brunner.write_setting(pitch_axis, 0x70, 'B', 0)
-        self.brunner.write_setting(pitch_axis, 0xA0, 'B', 0)
-        if not self.brunner.set_overrides(pitch_axis, False):
+        total_mask = pitch_axis | getattr(self.pid_assist, 'pid_axis_mask', 0)
+        self.brunner.write_setting(total_mask, 0x70, 'B', 0)
+        self.brunner.write_setting(total_mask, 0xA0, 'B', 0)
+        if not self.brunner.set_overrides(total_mask, False):
             raise RuntimeError('BRUNNER pitch override release was not acknowledged')
         if not self.brunner.set_position_forwarding():
             raise RuntimeError('BRUNNER position forwarding was not acknowledged')
