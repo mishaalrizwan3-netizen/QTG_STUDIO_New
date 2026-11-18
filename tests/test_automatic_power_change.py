@@ -100,11 +100,13 @@ class Workflow(unittest.TestCase):
         self.assertEqual([e for e in self.sim.events if e[0]=='step'],[])
     def test_test_selection_and_reference_isolation(self):
         self.assertTrue(selected(self.ctx))
-        other=dict(self.ctx,test_reference='2.c.(1)')
+        self.assertTrue(selected(dict(self.ctx, test_reference='2.b.(11)')))
+        other=dict(self.ctx,test_reference='2.d.(1)')
         self.assertFalse(selected(other))
         from backend.control import validate_method
         self.assertEqual(validate_method(REFERENCE,'power_dynamics'),'power_dynamics')
-        with self.assertRaises(ValueError):validate_method('2.c.(1)','power_dynamics')
+        self.assertEqual(validate_method('2.b.(11)','power_dynamics'),'power_dynamics')
+        with self.assertRaises(ValueError):validate_method('2.d.(1)','power_dynamics')
     def test_missing_aircraft_reference_is_not_claimed_as_pass(self):
         self.prepare();self.worker.command(dict(action='record'))
         for i in range(12):self.feed()

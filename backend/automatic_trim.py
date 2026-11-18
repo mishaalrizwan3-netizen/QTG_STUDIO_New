@@ -9,7 +9,8 @@ import json
 
 from backend.automatic_control import AutomaticControl, measured_control_fields, recorded_flight_fields
 
-REF = '2.a.(4)'
+REF = '2.a.(7)'
+LEGACY_REF = '2.a.(4)'
 METHOD = 'pitch_trim'
 UP, DOWN = 910, 911
 TRIM_STEP_INTERVAL = 1.0       # 1 second wait between trim steps
@@ -23,7 +24,8 @@ CHANNELS = (('trim_rad', 'ELEVATOR TRIM POSITION', 'radians'),
 
 
 def selected(context):
-    return context.get('mode') == 'auto' and context.get('test_reference') == REF and context.get('control_method') == METHOD
+    ref = context.get('test_reference')
+    return context.get('mode') == 'auto' and (ref == REF or ref == LEGACY_REF) and context.get('control_method') == METHOD
 
 
 class TrimEvents:

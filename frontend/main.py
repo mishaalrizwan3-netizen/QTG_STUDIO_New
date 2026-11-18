@@ -159,7 +159,7 @@ def default_channels_for_spec(spec_ref):
         return ENGINE_ACCEL_DEFAULT_KEYS
     elif spec_ref == "1.f.(2)":
         return ENGINE_DECEL_DEFAULT_KEYS
-    elif spec_ref == "2.b.(11)":
+    elif spec_ref in ("2.c.(1)", "2.b.(11)"):
         return set(POWER_DYNAMICS_DEFAULT_KEYS)
     elif spec_ref == "2.a.(1)":
         return set(STATIC_PITCH_DEFAULT_KEYS)
@@ -167,7 +167,7 @@ def default_channels_for_spec(spec_ref):
         return set(STATIC_ROLL_DEFAULT_KEYS)
     elif spec_ref == "2.a.(3)":
         return set(STATIC_YAW_DEFAULT_KEYS)
-    elif spec_ref == "2.a.(4)":
+    elif spec_ref in ("2.a.(7)", "2.a.(4)"):
         return {col for _, col in PDF_CHANNELS}
     elif spec_ref == "2.c.(8b)":
         return {"ias_kt", "stall_aoa", "stall_warning", "pitch_deg", "bank_deg", "pitch_position", "stall_elevator"}
@@ -2213,7 +2213,7 @@ class App(tk.Tk):
         self._common_view_labels["recording_indicator"].configure(fg=COL["green"] if recording_live else COL["dim"])
 
         if hasattr(self, 'common_reference_frame') and self.common_reference_frame.winfo_exists():
-            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)', '2.a.(4)', '2.c.(8b)', '2.b.(11)')
+            is_special_auto = (state.get("test_reference") in ('1.f.(1)', '1.f.(2)', '2.a.(1)', '2.a.(2)', '2.a.(3)', '2.a.(4)', '2.a.(7)', '2.c.(8b)', '2.b.(11)', '2.c.(1)')
                                and (state.get("mode") == "auto" or state.get("control_method") in ("engine_step", "static_control", "pitch_trim", "power_dynamics")))
             if is_special_auto:
                 if self.common_reference_frame.winfo_manager():
@@ -2264,9 +2264,9 @@ class App(tk.Tk):
                 reference_only = not universal_requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method or "replay"))
             engine_automatic = mode == 'auto' and spec.reference in ('1.f.(1)', '1.f.(2)')
             static_control_automatic = mode == 'auto' and spec.reference in ('2.a.(1)', '2.a.(2)', '2.a.(3)') and not reference_only
-            trim_automatic = mode == 'auto' and spec.reference == '2.a.(4)' and not reference_only
+            trim_automatic = mode == 'auto' and spec.reference in ('2.a.(7)', '2.a.(4)') and not reference_only
             stall_automatic = mode == 'auto' and spec.reference == '2.c.(8b)' and not reference_only
-            power_dynamics_automatic = mode == 'auto' and spec.reference == '2.b.(11)' and not reference_only
+            power_dynamics_automatic = mode == 'auto' and spec.reference in ('2.c.(1)', '2.b.(11)') and not reference_only
             if mode == "auto" and spec.reference == "1.c.(1)" and control_method is None:
 
                 selected_method = self._automatic_methods[spec.reference].get()
@@ -3361,7 +3361,7 @@ class App(tk.Tk):
                 messagebox.showerror('Saved initial conditions', str(exc), **parent_opt)
                 self._visible_condition_fields[spec.reference] = list(FIELDS)
             trim_keys = {"trim_position_rad", "trim_indicator", "trim_value_pct", "trim_elevator_surface_rad"}
-            channels = (PDF_CHANNELS if spec.reference == '2.a.(4)' else
+            channels = (PDF_CHANNELS if spec.reference in ('2.a.(7)', '2.a.(4)') else
                         [(label, key) for label, key in PDF_CHANNELS if key not in trim_keys])
             if spec.reference == '2.c.(8b)':
                 channels = channels + STALL_CHANNELS
@@ -3444,15 +3444,22 @@ class App(tk.Tk):
         if not hasattr(self,"_automatic_methods"): self._automatic_methods={}
         self._automatic_methods.setdefault(spec.reference,tk.StringVar(value="PID Automatic" if spec.reference=="1.c.(1)" else "Recorded Replay"))
         self._label(box,"Automatic Control Method",10,COL["text"],"bold").pack(anchor="w",pady=(4,2))
-        methods=["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)') else (["Pitch Trim Buttons"] if spec.reference == '2.a.(4)' else (["Recorded Replay","PID Automatic"] if spec.reference=="1.c.(1)" else ["Recorded Replay"]))
+        methods = (
+            ["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)')
+            else (["Pitch Trim Buttons"] if spec.reference in ('2.a.(7)', '2.a.(4)')
+            else (["Power Dynamics Step"] if spec.reference in ('2.c.(1)', '2.b.(11)')
+            else (["Recorded Replay", "PID Automatic"] if spec.reference == "1.c.(1)" else ["Recorded Replay"])))
+        )
         if spec.reference == '2.c.(8b)':
             methods = ['Pitch Stall Controller']
             self._automatic_methods[spec.reference].set('Pitch Stall Controller')
         if spec.reference in ('1.f.(1)', '1.f.(2)'):
             self._automatic_methods[spec.reference].set('P3D Throttle Step')
             self._label(box, 'Automatic initializes from Test Settings. Acceleration uses 5% idle to 100% throttle; Deceleration uses 100% to 5% idle. Click Start Recording when READY TO RECORD. Records 5 seconds, steps the P3D throttle, then stops after 3 seconds at target RPM. No Manual reference is required. Deceleration requires parking brake ON before full throttle.', 8, COL['dim'], wraplength=235, justify='left').pack(fill='x', pady=4)
-        if spec.reference == '2.a.(4)':
+        if spec.reference in ('2.a.(7)', '2.a.(4)'):
             self._automatic_methods[spec.reference].set('Pitch Trim Buttons')
+        if spec.reference in ('2.c.(1)', '2.b.(11)'):
+            self._automatic_methods[spec.reference].set('Power Dynamics Step')
         method_combo=ttk.Combobox(box,textvariable=self._automatic_methods[spec.reference],values=methods,
                      state="readonly" if unlocked else "disabled")
         method_combo.pack(fill="x")

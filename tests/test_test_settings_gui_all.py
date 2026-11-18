@@ -8,6 +8,7 @@ from tkinter import ttk
 import tkinter as tk
 
 from frontend import main
+from backend import catalog
 from backend.initial_condition_settings import load
 
 
@@ -41,7 +42,7 @@ class AllTestSettingsGUI(unittest.TestCase):
             app = main.App()
             app.withdraw()
             try:
-                index = next(i for i, spec in enumerate(main.TESTS) if spec.reference == '2.a.(4)')
+                index = next(i for i, spec in enumerate(main.TESTS) if spec.reference in ('2.a.(7)', '2.a.(4)'))
                 app.select_test(index)
                 app._open_test_password_dialog(index)
                 labels = [w.cget('text') for w in descendants(app.settings_panel) if isinstance(w, tk.Checkbutton)]
@@ -129,7 +130,8 @@ class AllTestSettingsGUI(unittest.TestCase):
             app = main.App()
             app.withdraw()
             try:
-                self.assertEqual(len(main.TESTS), 32)
+                self.assertEqual(len(main.TESTS), len(catalog.TESTS))
+                self.assertEqual(len(main.TESTS), 27)
                 for index, spec in enumerate(main.TESTS):
                     with self.subTest(reference=spec.reference):
                         app.select_test(index)

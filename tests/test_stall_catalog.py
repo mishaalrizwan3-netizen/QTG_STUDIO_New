@@ -12,11 +12,10 @@ from backend import pdf_graph_settings
 
 class StallCatalogTests(TestCase):
     def test_replaces_rudder_trim_slot_with_separate_reference(self):
-        index = next(i for i, test in enumerate(TESTS) if test.reference == '2.a.(4)')
-        stall = TESTS[index + 1]
+        stall = next(test for test in TESTS if test.reference == '2.c.(8b)')
         self.assertEqual(stall.reference, '2.c.(8b)')
-        self.assertEqual(stall.title, 'Stall warning (approach-to-stall characteristics)')
-        self.assertFalse(any(test.reference == '2.a.(5)' for test in TESTS))
+        self.assertIn('Stall warning', stall.title)
+        self.assertEqual(stall.group, 'Longitudinal Handling')
         values = catalog_defaults(stall)
         for key, expected in {'Flt cond': 'Approach', 'Alt[ft]': '4000', 'IAS[kts]': '90',
                               'Flaps': '0', 'Temperature[C]': '15', 'Throttle[%]': '80'}.items():

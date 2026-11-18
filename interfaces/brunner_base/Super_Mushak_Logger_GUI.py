@@ -1557,7 +1557,7 @@ class SuperMushakLoggerApp(QMainWindow):
         next_tick = 0.0
         sec_counter = 0
         trim_indicator_reader = None
-        if getattr(self, '_session_context', {}).get('test_reference') == '2.a.(4)':
+        if getattr(self, '_session_context', {}).get('test_reference') in ('2.a.(7)', '2.a.(4)'):
             try:
                 from interfaces.engine_measurements import Measurements
                 root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[2]
@@ -2039,7 +2039,7 @@ class SuperMushakLoggerApp(QMainWindow):
                 f"Throttle_{prefix.capitalize()}"
             ]
 
-            is_pitch_trim = getattr(self, '_session_context', {}).get('test_reference') == '2.a.(4)'
+            is_pitch_trim = getattr(self, '_session_context', {}).get('test_reference') in ('2.a.(7)', '2.a.(4)')
             is_stall = getattr(self, '_session_context', {}).get('test_reference') == '2.c.(8b)'
             is_buc = getattr(self, '_session_context', {}).get('test_reference') == '2.a.(8)'
             if is_pitch_trim:

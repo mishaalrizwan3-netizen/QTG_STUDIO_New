@@ -18,8 +18,8 @@ class InitialConditionSettingsTests(unittest.TestCase):
         self.root = Path(self.temp.name)
 
     def test_catalog_entries_without_requirements_remain_unset(self):
-        missing = [s for s in TESTS if s.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)', '2.c.(8b)', '2.a.(8)', '2.b.(11)')]
-        self.assertEqual(len(missing), 26)
+        missing = [s for s in TESTS if s.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)', '2.c.(8b)', '2.a.(8)', '2.c.(1)', '2.b.(11)')]
+        self.assertEqual(len(missing), 21)
         for spec in missing:
             with self.subTest(reference=spec.reference):
                 self.assertTrue(all(value == '' for value in catalog_defaults(spec).values()))
@@ -116,7 +116,7 @@ class InitialConditionSettingsTests(unittest.TestCase):
         with patch.object(main,'RESULTS_ROOT',self.root):
             for spec in TESTS:
                 main.App._ensure_test_settings(host,spec)
-            self.assertEqual(len(host._test_settings),32)
+            self.assertEqual(len(host._test_settings), len(TESTS))
             first=host._test_settings['2.a.(1)'][0]
             second=host._test_settings['2.a.(2)'][0]
             first['IAS[kts]'].set('67')

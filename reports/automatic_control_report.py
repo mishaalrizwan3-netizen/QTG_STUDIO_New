@@ -35,6 +35,7 @@ DEFAULT_SELECTED_BY_REF = {
     '2.a.(2)': ['ias_kt', 'roll_position', 'roll_force'],
     '2.a.(3)': ['ias_kt', 'rudder_position', 'rudder_force'],
     '2.a.(4)': ['trim_indicator', 'trim_position_rad', 'trim_value_pct', 'trim_elevator_surface_rad'],
+    '2.a.(7)': ['trim_indicator', 'trim_position_rad', 'trim_value_pct', 'trim_elevator_surface_rad'],
     '2.c.(8b)': ['ias_kt', 'stall_warning', 'stall_aoa', 'pitch_deg', 'bank_deg', 'pitch_position'],
 }
 
@@ -235,7 +236,7 @@ def save(context: Dict[str, Any], rows: List[Dict[str, Any]], result: str, reaso
         outputs.append(str(csv_path))
 
     # 2. Write Metadata
-    is_trim = test_ref == '2.a.(4)'
+    is_trim = test_ref in ('2.a.(7)', '2.a.(4)')
     is_stall = test_ref == '2.c.(8b)'
     trim_metrics = context.get('pitch_trim_metrics', {})
     travel_time = trim_metrics.get('total_travel_time_s')
@@ -312,7 +313,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
     t_max = _recorded_duration(tm)
 
     trim_subtitle = None
-    if test_ref == '2.a.(4)':
+    if test_ref in ('2.a.(7)', '2.a.(4)'):
         metrics = context.get('pitch_trim_metrics', {})
         t_time = metrics.get('total_travel_time_s')
         r_pct = metrics.get('average_trim_rate_pct_s')
@@ -364,7 +365,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
             _initial_page(pdf, 'auto', str(csv_path), df, ref_df, virtual_forces=ref_df is not None and test_ref != '2.c.(8b)', missing_label='N/A')
             count = len(chosen_items)
             fig, axes = plt.subplots(count, 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
-            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else 'Selected test graphs', fontsize=14, fontweight='bold')
+            fig.suptitle(f'{test_ref} Pitch Trim System Rate and Authority' if test_ref in ('2.a.(7)', '2.a.(4)') else 'Selected test graphs', fontsize=14, fontweight='bold')
             if trim_subtitle:
                 fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             for ax, (label, values, _) in zip(axes[:, 0], chosen_items):
@@ -385,7 +386,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
         if not chosen_items:
             # Fallback if nothing was matched
             fig, ax = plt.subplots(1, 1, figsize=(8.27, 11.69), constrained_layout=True)
-            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
+            fig.suptitle(f'{test_ref} Pitch Trim System Rate and Authority' if test_ref in ('2.a.(7)', '2.a.(4)') else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
             if trim_subtitle:
                 fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             ax.text(0.5, 0.5, 'No parameters selected for display', transform=ax.transAxes, ha='center', color='gray')
@@ -396,7 +397,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
         # If 4 or fewer items, present them together on Page 2 for direct visual correlation
         if len(chosen_items) <= 4:
             fig, axes = plt.subplots(len(chosen_items), 1, figsize=(8.27, 11.69), constrained_layout=True, squeeze=False)
-            fig.suptitle('2.a.(4) Pitch Trim System Rate and Authority' if test_ref == '2.a.(4)' else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
+            fig.suptitle(f'{test_ref} Pitch Trim System Rate and Authority' if test_ref in ('2.a.(7)', '2.a.(4)') else '1st Quadrant Combined Flight & Control Parameters', fontsize=14, fontweight='bold')
             if trim_subtitle:
                 fig.text(0.5, 0.965, trim_subtitle, ha='center', va='top', fontsize=9, fontweight='bold', color='#1D4ED8')
             for ax, (label, values, _) in zip(axes[:, 0], chosen_items):

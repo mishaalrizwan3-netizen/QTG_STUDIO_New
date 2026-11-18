@@ -17,7 +17,7 @@ class BUCreportTests(unittest.TestCase):
         status = Mock()
         App._launch_common_test(SimpleNamespace(common_status=status), 'auto', test)
         self.assertIn('Manual', status.configure.call_args.kwargs['text'])
-        self.assertTrue(any(x.reference == '2.a.(4)' for x in TESTS))
+        self.assertTrue(any(x.reference in ('2.a.(7)', '2.a.(4)') for x in TESTS))
 
     def test_selected_cockpit_axes_render_in_pdf(self):
         with tempfile.TemporaryDirectory() as folder:

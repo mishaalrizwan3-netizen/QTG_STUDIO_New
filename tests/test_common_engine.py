@@ -302,7 +302,7 @@ class CommonEngineTests(unittest.TestCase):
                         args=spawn.call_args.args[0]
                         self.assertIn('--brunner-test',args)
                         self.assertNotIn('--engine-suite',args)
-                self.assertEqual(spawn.call_count, 63)
+                self.assertEqual(spawn.call_count, len(main.TESTS) * 2 - 1)
 
     def test_frozen_launch_uses_bundled_exe(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -237,7 +237,7 @@ class AutomaticTrimTests(unittest.TestCase):
     def test_gui_dispatches_only_pitch_trim_automatic(self):
         from frontend.main import App, TESTS
         import qtg_common_engine as engine
-        spec = next(item for item in TESTS if item.reference == '2.a.(4)')
+        spec = next(item for item in TESTS if item.reference in ('2.a.(7)', '2.a.(4)'))
         values = {'Flt cond': 'Clean', 'Alt[ft]': '2000', 'IAS[kts]': '80',
                   'Latitude[deg]': '32', 'Longitude[deg]': '74', 'Heading[deg]': '0',
                   'Pitch[deg]': '0', 'Bank[deg]': '0', 'Flaps': '0', 'Throttle[%]': '80', 'Temperature[C]': '15'}
@@ -249,7 +249,7 @@ class AutomaticTrimTests(unittest.TestCase):
         with patch.object(engine, 'launch', return_value=(Mock(), {'status_file': 'dummy'})) as launch:
             App._launch_common_test(host, 'auto', spec)
         self.assertEqual(launch.call_args.kwargs['control_method'], 'pitch_trim')
-        self.assertEqual(launch.call_args.args[1].reference, '2.a.(4)')
+        self.assertEqual(launch.call_args.args[1].reference, spec.reference)
 
     def test_worker_end_to_end_ready_record_and_shutdown(self):
         brunner = Mock()

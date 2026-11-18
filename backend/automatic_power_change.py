@@ -15,7 +15,8 @@ import time
 
 from backend.verifier import validate_conditions
 
-REFERENCE = '2.b.(11)'  # Internal: catalog's 2.c.(1) is already Roll Response.
+REFERENCE = '2.c.(1)'  # CS-FSTD(A) Longitudinal Handling c.(1)
+LEGACY_REFERENCE = '2.b.(11)'
 METHOD = 'power_dynamics'
 BASELINE_S = 5.0
 POST_POWER_S = 15.0
@@ -26,8 +27,9 @@ MAX_RECORDING_S = 28.0
 
 
 def selected(context):
+    ref = context.get('test_reference')
     return (context.get('mode') == 'auto' and context.get('control_method') == METHOD
-            and context.get('test_reference') == REFERENCE)
+            and (ref == REFERENCE or ref == LEGACY_REFERENCE))
 
 
 ALIASES = {

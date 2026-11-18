@@ -35,6 +35,7 @@ class PitchTrimReportTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerows([dict(zip(fields, row)) for row in [(0, -.1, -.8, -20, -.02), (1, .1, -.2, 20, .03)]])
             selected = {'trim_position_rad', 'trim_indicator', 'trim_value_pct', 'trim_elevator_surface_rad'}
+            self.assertTrue(selected.issubset(default_channels_for_spec('2.a.(7)')))
             self.assertTrue(selected.issubset(default_channels_for_spec('2.a.(4)')))
             _manual_report(source, output, selected_graphs=selected)
             with fitz.open(output) as document:

@@ -181,15 +181,16 @@ class PanelTest(unittest.TestCase):
                 host._apply_test_settings = lambda spec: main.App._apply_test_settings(host,spec)
                 host._fly_to_initial_conditions = lambda spec,**kw: main.App._fly_to_initial_conditions(host,spec,**kw)
                 host.update_idletasks = root.update_idletasks
-                spec = main.TESTS[2]
+                idx = next(i for i, s in enumerate(main.TESTS) if s.reference == '1.f.(1)')
+                spec = main.TESTS[idx]
                 host._build_settings_panel(spec)
                 self.assertEqual(host.settings_panel.winfo_manager(), '')
                 for password in (None, 'wrong'):
                     with patch.object(main.simpledialog,'askstring',return_value=password), patch.object(main.messagebox,'showerror'):
-                        host._open_test_password_dialog(2)
+                        host._open_test_password_dialog(idx)
                     self.assertEqual(host.settings_panel.winfo_manager(), '')
                 with patch.object(main.simpledialog,'askstring',return_value=main.TEST_ADMIN_PASSWORD):
-                    host._open_test_password_dialog(2)
+                    host._open_test_password_dialog(idx)
                 self.assertEqual(host.settings_panel.winfo_manager(), 'pack')
                 fields,graphs = host._test_settings[spec.reference]
                 self.assertIn('Heading[deg]', fields)
