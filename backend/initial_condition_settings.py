@@ -77,12 +77,11 @@ def load_visible_fields(root, reference):
     return visible
 
 
-def save(root, reference, values, *, visible_fields=None, validate_values=True):
+def save(root, reference, values, *, visible_fields=None):
     path = _path(root, reference)
     if set(values) != set(FIELDS) or any(not isinstance(v, str) for v in values.values()):
         raise ValueError('Initial conditions must contain the expected fields')
-    if validate_values:
-        validate(values)
+    validate(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     if visible_fields is None:
         visible_fields = load_visible_fields(root, reference)

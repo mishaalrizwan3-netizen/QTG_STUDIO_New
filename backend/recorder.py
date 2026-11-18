@@ -26,6 +26,7 @@ def snapshot(window, context):
         controlling=bool(window.is_recording or getattr(window,'pid_controller_active',False)),recording=bool(window.is_recording and (getattr(window,'_control_method','replay')!='pid' or getattr(window,'pid_phase','')=='recording')),can_record=bool(getattr(window,'_control_method','replay')!='pid' and getattr(window,'_prepared',False)
             and window.current_stage=='Connected & Ready to Record' and not window.is_recording
             and window.p3d and window.p3d.is_connected() and window.brunner.sock) or bool(not getattr(window,'pid_automatic_workflow',False) and getattr(window,'pid_controller_active',False) and not window.is_recording and not getattr(window,'pid_paused',True)),
+        bank_phase=getattr(window,'bank_phase',''),bank_active=getattr(window,'bank_active',False),bank_live=getattr(window,'bank_live',{}),
         data_directory=str(window.data_dir),outputs=list(getattr(window,'_outputs',[])),telemetry=telemetry)
 
 

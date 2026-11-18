@@ -25,7 +25,7 @@ class RunContext(TypedDict):
     test_reference: str
     title: str
     mode: Literal["manual", "auto"]
-    control_method: Literal["replay", "pid"]
+    control_method: Literal["replay", "pid", "bank_pid"]
     duration_s: int
     initial_conditions: InitialConditions | None
     selected_graphs: list[str] | None

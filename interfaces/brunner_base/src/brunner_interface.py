@@ -226,6 +226,14 @@ class BrunnerInterface:
         """Safely returns motors to center and releases all autopilot overrides."""
         if not self.sock:
             return
+        multi = getattr(self, '_multi_pid_transport', None)
+        if multi is not None:
+            multi.release()
+            return
+        bank = getattr(self, '_bank_transport', None)
+        if bank is not None:
+            bank.release()
+            return
         if getattr(self,'_pid_transport',None) is not None:
             try:self._pid_transport.release()
             finally:

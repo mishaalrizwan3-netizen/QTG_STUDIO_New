@@ -1,3 +1,4 @@
+import threading
 """One QTG launch path; initialization/recording/replay stay in the brunner codebase.
 
 The Qt runtime uses a separate process because QTG Studio uses Tk. Explicit
@@ -279,31 +280,21 @@ from backend.artifacts import test_directory, named_result
 from backend.initializer import apply_manual_conditions
 
 
-def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False):
+def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False, **kwargs):
     if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
-    if control_method == 'engine_step' and mode != 'auto':
-        raise ValueError('Engine throttle step requires Automatic Testing')
     policy=engine_test_policy(spec.reference)
     duration_s=validate_duration(policy.DURATION_SECONDS if policy else (75 if duration_s is None else duration_s))
-    if control_method == 'engine_step':
-        duration_s = 35  # Five-second baseline plus the bounded response window.
     initial_condition_overrides = None
     if spec.reference == '1.f.(2)':
         from backend.deceleration_config import resolve_initial_conditions
-        from backend.engine_conditions import deceleration_overrides
         initial_condition_overrides = dict(initial_conditions or {})
-        if mode == 'manual' or control_method == 'engine_step':
-            initial_condition_overrides = deceleration_overrides(initial_condition_overrides)
         initial_conditions = resolve_initial_conditions(initial_condition_overrides)
     else:
         initial_conditions=validate_conditions(initial_conditions)
-    if spec.reference in ('1.f.(1)', '1.f.(2)') and (mode == 'manual' or control_method == 'engine_step'):
-        from backend.engine_conditions import enforce
-        initial_conditions = enforce(spec.reference, initial_conditions)
     brunner_root()
     validate_method(spec.reference, control_method)
     from backend.engine_initialization_adapter import requested
-    universal_auto = mode == 'auto' and control_method != 'engine_step' and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
+    universal_auto = mode == 'auto' and control_method not in ('bank_pid', 'yaw_pid', 'multi_pid') and requested(dict(test_reference=spec.reference, mode=mode, control_method=control_method))
     if mode=='auto' and (control_method=='replay' or universal_auto):
         if not reference:
             raise ValueError('Select a Manual reference CSV before Universal Automatic initialization; GUI targets cannot substitute.')
@@ -329,13 +320,16 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
             and mode == 'manual' and control_method == 'replay'):
         context['acceleration_manual_airflow_preparation'] = True
     context_path=output/(token+'_context.json')
-    if control_method == 'engine_step':
-        context['initialization_policy'] = 'Operator aircraft settings; P3D throttle only; no BRUNNER ownership'
-    if control_method == 'static_control':
-        context['initialization_policy'] = 'Operator aircraft settings; exclusive axis motion; no other axis movement'
     if spec.reference == '1.f.(2)':
         context['input_file'] = str(context_path)
         context['initialization_file'] = 'test_suites/engine_deceleration/initialization.json'
+    context['bank_parent_pid'] = os.getpid()
+    context['yaw_parent_pid'] = os.getpid()
+    context['multi_parent_pid'] = os.getpid()
+    if 'active_pids' in kwargs:
+        context['active_pids'] = kwargs['active_pids']
+    if 'target_heading_mag' in kwargs:
+        context['target_heading_mag'] = float(kwargs['target_heading_mag'])
     context_path.write_text(json.dumps(context,indent=2),encoding='utf-8')
     args=[sys.executable]
     if not getattr(sys,'frozen',False): args.append(str(Path(__file__).resolve().parent/'main.py'))
@@ -354,6 +348,8 @@ from backend.initializer import configure_test_extension
 
 
 def universal_initialization_enabled(window):
+    if getattr(window, '_control_method', None) in ('bank_pid', 'yaw_pid', 'multi_pid'):
+        return False  # Bank/Yaw/Multi-PID uses the existing selected-condition Manual preparation.
     from backend.engine_initialization_adapter import requested
     context = getattr(window, '_session_context', {})
     return (context.get('universal_initialization_enabled', False) is True
@@ -370,6 +366,42 @@ def initialize_mode(window, mode, reference=None):
             begin()
         from backend.engine_initialization_adapter import validate_trial
         validate_trial(window, mode)
+        old_bank = getattr(window.brunner, '_bank_transport', None)
+        if old_bank is not None:
+            old_bank.release()
+            del window.brunner._bank_transport
+        old_yaw = getattr(window.brunner, '_yaw_transport', None)
+        if old_yaw is not None:
+            old_yaw.release()
+            del window.brunner._yaw_transport
+        old_multi = getattr(window.brunner, '_multi_pid_transport', None)
+        if old_multi is not None:
+            old_multi.release()
+            del window.brunner._multi_pid_transport
+        if mode == 'auto' and getattr(window, '_control_method', 'replay') == 'multi_pid':
+            if not window.p3d or not window.p3d.is_connected() or not window.brunner.sock:
+                raise RuntimeError('P3D and BRUNNER must both be connected')
+            configure_test_extension(window, None)
+            from backend.multi_pid_runner import prepare
+            window._prepared = False
+            window._preparing = True
+            return prepare(window, window._base_module)
+        if mode == 'auto' and getattr(window, '_control_method', 'replay') == 'bank_pid':
+            if not window.p3d or not window.p3d.is_connected() or not window.brunner.sock:
+                raise RuntimeError('P3D and BRUNNER must both be connected')
+            configure_test_extension(window, None)  # Remove a previous engine adapter on worker reuse.
+            from backend.bank_pid_runner import prepare
+            window._prepared = False
+            window._preparing = True
+            return prepare(window, window._base_module)
+        if mode == 'auto' and getattr(window, '_control_method', 'replay') == 'yaw_pid':
+            if not window.p3d or not window.p3d.is_connected() or not window.brunner.sock:
+                raise RuntimeError('P3D and BRUNNER must both be connected')
+            configure_test_extension(window, None)  # Remove a previous engine adapter on worker reuse.
+            from backend.yaw_pid_runner import prepare
+            window._prepared = False
+            window._preparing = True
+            return prepare(window, window._base_module)
         if universal_initialization_enabled(window):
             return window._start_universal_initialization(mode)
         return _initialize_mode(window, mode, reference)
@@ -739,6 +771,20 @@ def worker_class(base,context,publish):
             self._publish()
 
         def arm_recording(self):
+            if getattr(self, '_control_method', 'replay') in ('bank_pid', 'yaw_pid', 'multi_pid'):
+                prep = getattr(self, 'preparation_thread', None)
+                if (not self._prepared or self.stop_worker_event.is_set()
+                        or (prep is not None and prep.is_alive())):
+                    return
+                self._prepared = False
+                self.test_mode = 'auto'
+                self._external_control_active = True
+                self.is_recording = False
+                for name in ('rec_time','p_pos_buf','r_pos_buf','y_pos_buf','p_force_buf','r_force_buf','y_force_buf','p3d_tele_buf','applied_force_buf','virtual_force_buf','replay_command_buf'):
+                    getattr(self, name).clear()
+                self.worker_thread = threading.Thread(target=self._auto_replay_loop, daemon=True)
+                self.worker_thread.start()
+                return
             # Also guard the inherited Qt button/spacebar entry, not just IPC.
             if universal_initialization_enabled(self):
                 from backend.engine_initialization_adapter import initialization_only
@@ -756,6 +802,9 @@ def worker_class(base,context,publish):
 
         def handle_command(self,command):
             action=command['action']
+            if action == 'record' and getattr(self, '_control_method', 'replay') in ('bank_pid', 'yaw_pid', 'multi_pid'):
+                return  # Bank/Yaw Automatic owns recording startup after preparation.
+
             if action == 'invalidate_initialization':
                 session = self._session_context
                 # Ignore delayed notifications from an older GUI snapshot/session.
@@ -908,10 +957,10 @@ def worker_class(base,context,publish):
                     return
                 mode=command['mode']
                 method=command.get('control_method','replay')
-                if method not in ('replay','pid'): raise ValueError('Unknown Automatic control method')
+                if method not in ('replay','pid','bank_pid','yaw_pid','multi_pid'): raise ValueError('Unknown Automatic control method')
                 if method=='pid' and command.get('test_reference',context['test_reference'])!='1.c.(1)': raise ValueError('PID is supported only for normal climb.')
                 from backend.engine_initialization_adapter import requested
-                universal_auto = mode == 'auto' and requested(dict(test_reference=command.get('test_reference', context['test_reference']), mode=mode, control_method=method))
+                universal_auto = mode == 'auto' and method not in ('bank_pid', 'yaw_pid', 'multi_pid') and requested(dict(test_reference=command.get('test_reference', context['test_reference']), mode=mode, control_method=method))
                 reference=validate_reference(command['reference_csv']) if mode=='auto' and (method=='replay' or universal_auto) else None
                 duration=validate_duration(command.get('duration_s',75))
                 if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
@@ -923,17 +972,11 @@ def worker_class(base,context,publish):
                 if requested_test == '1.f.(2)':
                     from backend.deceleration_config import resolve_initial_conditions
                     overrides = dict(command.get('initial_conditions') or {})
-                    if mode == 'manual':
-                        from backend.engine_conditions import deceleration_overrides
-                        overrides = deceleration_overrides(overrides)
                     conditions = resolve_initial_conditions(overrides)
                     context['initial_condition_overrides'] = overrides
                 else:
                     conditions=validate_conditions(command.get('initial_conditions'))
                     context['initial_condition_overrides'] = None
-                if mode == 'manual' and requested_test in ('1.f.(1)', '1.f.(2)'):
-                    from backend.engine_conditions import enforce
-                    conditions = enforce(requested_test, conditions)
                 # Set Conditions already prepares Manual mode. Selecting Manual again
                 # must not teleport the aircraft or repeat hardware preparation.
                 airflow_preparation = (command.get('acceleration_manual_airflow_preparation') is True
@@ -962,6 +1005,12 @@ def worker_class(base,context,publish):
                 context.update(control_method=method,pid_conditions=command.get('pid_conditions'),validation_csv=command.get('validation_csv'),mode=mode,reference_csv=reference,test_reference=command.get('test_reference',context['test_reference']),
                                title=command.get('title',context['title']),duration_s=duration)
                 context['operator_initiated_universal_manual'] = (command.get('operator_initiated_universal_manual') is True and context['test_reference'] == '1.f.(2)' and mode == 'manual')
+                if method == 'multi_pid':
+                    context['active_pids'] = dict(command.get('active_pids') or {})
+                else:
+                    context.pop('active_pids', None)
+                if method in ('yaw_pid', 'multi_pid'):
+                    context['target_heading_mag'] = command.get('target_heading_mag', 270.)
                 context['configuration_revision'] = command.get('configuration_revision')
                 context.pop('gui_configuration_invalidated', None)
                 context.pop('manual_manager_active', None)
@@ -978,12 +1027,24 @@ def worker_class(base,context,publish):
                     initialize_mode(self,mode,reference)
 
         def _auto_replay_loop(self):
+            if getattr(self, '_control_method', 'replay') == 'multi_pid':
+                from backend.multi_pid_runner import loop
+                return loop(self, base)
+            if getattr(self, '_control_method', 'replay') == 'bank_pid':
+                from backend.bank_pid_runner import loop
+                return loop(self, base)
+            if getattr(self, '_control_method', 'replay') == 'yaw_pid':
+                from backend.yaw_pid_runner import loop
+                return loop(self, base)
             if self._control_method=='pid':
                 from qtg_climb_pid import loop
                 return loop(self,base)
             return super()._auto_replay_loop()
 
         def _on_ui_timer_tick(self):
+            if (getattr(self, '_control_method', 'replay') in ('bank_pid', 'yaw_pid', 'multi_pid') and self._prepared
+                    and not self.is_recording and not self.stop_worker_event.is_set()):
+                self.arm_recording()
             # Keep the existing status refresh, but do not hide PID feedback failures.
             if universal_initialization_enabled(self):
                 self._poll_universal_initialization()
@@ -995,7 +1056,7 @@ def worker_class(base,context,publish):
                 if getattr(self, '_telemetry_diagnostic', None) is not None:
                     self._diagnostic_brunner_display = self.lbl_brunner_sticks.text()
             except Exception as exc:
-                if self._control_method=='pid':
+                if self._control_method in ('pid', 'bank_pid', 'yaw_pid', 'multi_pid'):
                     self.stop_test()
                     self._update_stage_ui(base.STAGE_CONNECTION_ERROR,str(exc))
                 else: raise
@@ -1077,6 +1138,15 @@ def worker_class(base,context,publish):
                 if not any(path.endswith('.pdf') for path in self._outputs):
                     self.current_stage=base.STAGE_CONNECTION_ERROR
                     self._stage_details='PID data saved, but report generation failed. Check validation CSV and diagnostics.'
+            if getattr(self, '_control_method', 'replay') == 'bank_pid' and getattr(self, 'bank_fault', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Incomplete Bank PID test: '+self.bank_fault
+            if getattr(self, '_control_method', 'replay') == 'yaw_pid' and getattr(self, 'yaw_fault', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Incomplete Yaw PID test: '+self.yaw_fault
+            if getattr(self, '_control_method', 'replay') == 'multi_pid' and getattr(self, 'multi_pid_fault', None):
+                self.current_stage = base.STAGE_CONNECTION_ERROR
+                self._stage_details = 'Incomplete Multi-PID test: '+self.multi_pid_fault
             if self.current_stage=='Generating reports': self.current_stage=base.STAGE_COMPLETED
             from backend.engine_initialization_adapter import mark
             if self.current_stage == base.STAGE_COMPLETED:
@@ -1084,7 +1154,7 @@ def worker_class(base,context,publish):
             if getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None):
                 self.current_stage=base.STAGE_CONNECTION_ERROR
                 self._stage_details='Incomplete PID test: '+self.pid_fault
-            if any(path.lower().endswith('.pdf') for path in self._outputs) and not (getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None)):
+            if any(path.lower().endswith('.pdf') for path in self._outputs) and not (getattr(self,'_control_method','replay')=='pid' and getattr(self,'pid_fault',None)) and not (getattr(self, '_control_method', 'replay') == 'bank_pid' and getattr(self, 'bank_fault', None)) and not (getattr(self, '_control_method', 'replay') == 'yaw_pid' and getattr(self, 'yaw_fault', None)) and not (getattr(self, '_control_method', 'replay') == 'multi_pid' and getattr(self, 'multi_pid_fault', None)):
                 self.lbl_rec_status.setText('COMPLETED - CSV and PDF reports saved')
             if context.get('test_reference') == '1.f.(2)':
                 from backend.deceleration_config import write_output_manifest
@@ -1127,20 +1197,6 @@ def run(context_path):
         except PermissionError:
             # The Tk reader may briefly hold the file on Windows. Publish next tick.
             temporary.unlink(missing_ok=True)
-    from backend.automatic_engine import selected
-    if selected(context):
-        from contextlib import redirect_stdout, redirect_stderr
-        from backend.automatic_engine import run as run_automatic_engine
-        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
-            with redirect_stdout(stream), redirect_stderr(stream):
-                return run_automatic_engine(context, publish)
-    from backend.automatic_control import selected as static_control_selected
-    if static_control_selected(context):
-        from contextlib import redirect_stdout, redirect_stderr
-        from backend.automatic_control import run as run_automatic_control
-        with open(status_path.with_suffix('.log'), 'a', encoding='utf-8', buffering=1) as stream:
-            with redirect_stdout(stream), redirect_stderr(stream):
-                return run_automatic_control(context, publish)
     stream=open(status_path.with_suffix('.log'),'a',encoding='utf-8',buffering=1)
     sys.stdout=sys.stderr=stream
     base=load_base()
@@ -1187,7 +1243,7 @@ def run(context_path):
                     pending['initial']=False
                     window._update_stage_ui(base.STAGE_CONNECTION_ERROR,'Could not connect to both P3D and BRUNNER. Check Prepar3D and CLS2Sim.')
         except Exception as exc:
-            if getattr(window,'pid_controller_active',False):
+            if getattr(window,'pid_controller_active',False) or getattr(window,'bank_active',False):
                 window.stop_test()
                 window.pid_controller_active=False
             window._update_stage_ui(base.STAGE_CONNECTION_ERROR,str(exc))

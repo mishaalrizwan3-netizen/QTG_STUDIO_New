@@ -43,3 +43,18 @@ SMK_Engine_V213_OriginalAirManager/
 docs/*approval*
 docs/*APPROVAL*
 docs/*plan*.json
+
+# Team source release: retain project runtime bridges and native build inputs.
+!p3d_bridge.dll
+!qtg_p3d_bridge.lib
+!qtg_simconnect.lib
+!bridge/bin/*.dll
+!interfaces/brunner_base/native/bin/*.dll
+!p3d_sdk/
+!p3d_sdk/SimConnect.h
+!p3d_sdk/SimConnect.lib
+!easa_references/
+!easa_references/*.png
+
+# Working snapshots are not part of the shared application.
+_working_backup_bank_pid_stable/

@@ -15,22 +15,16 @@ def apply_manual_conditions(window,values):
     from backend.airborne_preparation import enabled, prepare
     if enabled(window):
         window._manual_airflow_ready = None
-    reference = getattr(window, '_session_context', {}).get('test_reference')
-    from backend.engine_conditions import enforce
-    cfg=enforce(reference, values);sim=window.p3d
+    cfg=validate_conditions(values);sim=window.p3d
     if not sim or not sim.is_connected():raise RuntimeError('Sim Flight Model disconnected.')
     sim.pause_sim()
     if not sim.wait_for_paused(3.):raise RuntimeError('Simulator did not confirm pause.')
     if window.stop_worker_event.is_set():raise RuntimeError('Manual initialization cancelled.')
-    if reference == '1.f.(2)' and not sim.set_initial_throttle(5.):
-        raise RuntimeError('Initial idle throttle rejected.')
     from replay_support import reference_weather_metar
     metar=reference_weather_metar({'altitude_msl':cfg['alt_ft'],'oat':cfg['temperature_c']},sim.get_global_weather_metar())
     if metar and not sim.set_global_weather_metar(metar):raise RuntimeError('Initial temperature rejected.')
     if not sim.queue_position_airborne(alt_ft=cfg['alt_ft'],speed_kts=cfg['ias_kt'],pitch_deg=cfg["pitch_deg"],bank_deg=-cfg["bank_deg"],hdg_deg=cfg["heading_deg"],lat=cfg['lat'],lon=cfg['lon'],on_ground=cfg['on_ground']):raise RuntimeError('Initial position rejected.')
     window._wait_for_initial_altitude(cfg['alt_ft'])
-    if reference == '1.f.(2)':
-        verify_manual_deceleration_brake(window)
     # INITPOSITION and aircraft reload handling can reset power and flap handles.
     # Apply them after position readback, then wait for fresh telemetry; never drive it in flight.
     if not sim.set_initial_throttle(cfg['throttle']):raise RuntimeError('Initial throttle rejected.')
@@ -61,32 +55,6 @@ def apply_manual_conditions(window,values):
     if enabled(window):
         actual = prepare(window, cfg, actual)
     return actual
-
-
-def verify_manual_deceleration_brake(window, *, reader_factory=None, clock=time.monotonic):
-    """Verify fresh parking brake and ground readback before initial full power."""
-    if reader_factory is None:
-        from interfaces.engine_measurements import Measurements
-        root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[1]
-        reader_factory = lambda: Measurements(root/'bridge/bin/qtg_simconnect.dll')
-    reader = reader_factory()
-    deadline = clock() + 5.
-    try:
-        while clock() < deadline:
-            if window.stop_worker_event.is_set():
-                raise RuntimeError('Manual initialization cancelled before full throttle.')
-            if not window.p3d or not window.p3d.is_connected():
-                raise RuntimeError('P3D disconnected before parking brake verification.')
-            frame = reader.poll()
-            now = clock()
-            if frame and 0 <= now - frame['receipt_time'] <= 1:
-                if (frame.get('parking_brake') == 1 and frame.get('on_ground') == 1
-                        and 0 <= frame.get('ground_speed', float('nan')) <= 1):
-                    return
-            window.stop_worker_event.wait(.04)
-        raise RuntimeError('Manual Deceleration requires fresh parking brake ON, on-ground and stationary readback before full throttle.')
-    finally:
-        reader.close()
 
 
 def configure_test_extension(window, reference):

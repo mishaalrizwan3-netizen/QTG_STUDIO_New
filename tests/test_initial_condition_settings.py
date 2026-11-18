@@ -50,14 +50,6 @@ class InitialConditionSettingsTests(unittest.TestCase):
         save(self.root,'2.b.(1)',values)
         self.assertEqual(load(self.root,'2.b.(1)')['IAS[kts]'],'0')
 
-    def test_in_progress_edit_can_be_restored_but_is_still_validated_for_use(self):
-        values = dict.fromkeys(FIELDS, '')
-        values['Throttle[%]'] = '8x'
-        save(self.root, '2.a.(1)', values, validate_values=False)
-        self.assertEqual(load(self.root, '2.a.(1)')['Throttle[%]'], '8x')
-        with self.assertRaises(ValueError):
-            validate(load(self.root, '2.a.(1)'))
-
     def test_invalid_and_mismatched_data_are_not_accepted(self):
         values=dict.fromkeys(FIELDS, '')
         for field,value in (('IAS[kts]','nan'),('Flaps','1.5'),('Latitude[deg]','91')):

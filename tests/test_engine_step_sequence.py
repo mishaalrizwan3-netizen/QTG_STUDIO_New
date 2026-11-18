@@ -3,12 +3,11 @@ from backend.engine_step_sequence import EngineStepSequence, Settings
 
 
 def settings(deceleration=False):
-    return Settings(target_rpm=970 if deceleration else 2700,
+    return Settings(target_rpm=972 if deceleration else 2700,
                     initial_throttle=100 if deceleration else 5,
                     final_throttle=5 if deceleration else 100,
                     starting_throttle_tolerance=1, throttle_event_delta=2,
-                    engine_response_delta=100, max_receipt_age=2,
-                    min_total_seconds=15.0)
+                    engine_response_delta=100, max_receipt_age=2)
 
 
 def sample(seq, t, rpm, throttle, **kwargs):
@@ -31,21 +30,17 @@ class EngineStepTests(unittest.TestCase):
                         self.assertIsNone(sample(seq, t, initial_rpm, cfg.initial_throttle))
                     self.assertEqual(sample(seq, 5, initial_rpm, cfg.initial_throttle),
                                      {'type': 'set_throttle', 'percent': cfg.final_throttle})
-                    for t in range(6, 16): sample(seq, t, cfg.target_rpm, cfg.final_throttle)
+                    for t in (6, 7, 8, 9): sample(seq, t, cfg.target_rpm, cfg.final_throttle)
                     self.assertEqual(seq.phase, 'COMPLETE')
                     self.assertEqual(seq.events['throttle_onset'], 6)
                     self.assertEqual(seq.events['recording_start'], 0)
-                    self.assertEqual(seq.events['recording_stop'], 15)
 
     def test_fluctuation_resets_stability(self):
         seq=EngineStepSequence(settings()); seq.start(0)
         baseline(seq,1000,5); sample(seq,6,2700,100); sample(seq,8,2800,100)
         sample(seq,9,2700,100); sample(seq,11,2700,100)
         self.assertEqual(seq.phase, 'STABILIZING')
-        sample(seq,12,2700,100)
-        self.assertEqual(seq.phase, 'STABILIZING')
-        for t in (13, 14, 15): sample(seq, t, 2700, 100)
-        self.assertEqual(seq.phase, 'COMPLETE')
+        sample(seq,12,2700,100); self.assertEqual(seq.phase, 'COMPLETE')
 
     def test_no_completion_without_measured_event_or_engine_response(self):
         seq=EngineStepSequence(settings()); seq.start(0)

@@ -587,41 +587,28 @@ def _automatic_virtual_force_inverted(df, axis):
 
 
 def _safe(df, key, default=np.nan):
+
     arr = _series(df, key)
+
     valid = arr[np.isfinite(arr)]
+
     if len(valid) > 0:
+
         return float(valid[0])
+
     return default
 
-
-def _safe_initial(df, key, default=np.nan, metadata=None):
-    if df is None or len(df) == 0:
-        return default
-    arr = _series(df, key)
-    time_col = next((c for c in ("Time (s)", "time_s", "time") if c in df.columns), None)
-    if time_col is not None:
-        times = pd.to_numeric(df[time_col], errors="coerce").to_numpy()
-        event_time = float(metadata.get("event_time_s", 5.0)) if metadata and "event_time_s" in metadata else 5.0
-        target_t = event_time - 0.2
-        mask = (times <= target_t) & np.isfinite(times) & np.isfinite(arr)
-        if np.any(mask):
-            idx = np.where(mask)[0][-1]
-            return float(arr[idx])
-        mask = (times < event_time) & np.isfinite(times) & np.isfinite(arr)
-        if np.any(mask):
-            idx = np.where(mask)[0][-1]
-            return float(arr[idx])
-    valid = arr[np.isfinite(arr)]
-    if len(valid) > 0:
-        return float(valid[0])
-    return default
 
 
 def _fmt(v, unit=""):
+
     try:
+
         v = float(v)
+
         if not math.isfinite(v):
-            return "N/A"
+
+            return "-"
 
         if unit == "normalised":
 
@@ -841,7 +828,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
 
 
 
-    if is_auto and ref_df is not None:
+    if is_auto:
 
         ax.text(0.105, 0.758, "Validation", fontsize=6.5, family="monospace", ha="right")
 
@@ -969,12 +956,11 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
 
 
 
-        sim_val = _safe_initial(sim_df, key, metadata=metadata)
-        simv = _fmt(sim_val, unit)
+        simv = _fmt(_safe(sim_df, key), unit)
 
         if is_auto and ref_df is not None:
 
-            return _fmt(_safe_initial(ref_df, key, metadata=metadata), unit), simv
+            return _fmt(_safe(ref_df, key), unit), simv
 
         return "", simv
 
@@ -1000,7 +986,7 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
 
                 refv, simv = values(key, unit)
 
-                if is_auto and ref_df is not None:
+                if is_auto:
 
                     ax.text(x + 0.055, y, refv, fontsize=6.0, family="monospace", ha="right")
 
@@ -1100,13 +1086,11 @@ def _brunner_tracking_check(auto_path):
 
 def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=None, metadata=None, selected_graphs=None):
 
-    is_auto = (ref_path is not None) or (metadata and str(metadata.get("mode", "")).lower() == "auto")
-
-    has_ref = ref_path is not None
+    is_auto = ref_path is not None
 
     sim_df = _load_engine_dataframe(sim_path)
 
-    ref_df = _load_engine_dataframe(ref_path) if has_ref else None
+    ref_df = _load_engine_dataframe(ref_path) if is_auto else None
 
     # The legacy file owns genuinely recorded 1-Hz fallback measurements.
 
@@ -1114,7 +1098,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
     sim_legacy = _read_csv(sim_path)
 
-    ref_legacy = _read_csv(ref_path) if has_ref else None
+    ref_legacy = _read_csv(ref_path) if is_auto else None
 
 
 
@@ -1146,19 +1130,19 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
     sim_event = _resolve_event_time(sim_path, sim_df, kind=kind.lower(), meta=metadata)
 
-    ref_event = _resolve_event_time(ref_path, ref_df, kind=kind.lower()) if has_ref else 0.0
+    ref_event = _resolve_event_time(ref_path, ref_df, kind=kind.lower()) if is_auto else 0.0
 
 
 
     t_sim = _series(sim_df, "time_s") - sim_event
 
-    t_ref = (_series(ref_df, "time_s") - ref_event) if has_ref else None
+    t_ref = (_series(ref_df, "time_s") - ref_event) if is_auto else None
 
 
 
     all_t = list(t_sim[np.isfinite(t_sim)])
 
-    if has_ref and t_ref is not None:
+    if is_auto and t_ref is not None:
 
         all_t += list(t_ref[np.isfinite(t_ref)])
 
@@ -1244,15 +1228,9 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                     # Automatic test: inverted virtual force (-1.0 * VF in Newtons)
 
-                    if has_ref:
+                    if is_auto:
 
                         y_ref = _manual_applied_force(ref_df, force_axis)
-
-                        y_sim = _automatic_virtual_force_inverted(sim_df, force_axis)
-
-                    elif is_auto:
-
-                        y_ref = None
 
                         y_sim = _automatic_virtual_force_inverted(sim_df, force_axis)
 
@@ -1266,7 +1244,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                     y_sim = _series(sim_df, key)
 
-                    y_ref = _series(ref_df, key) if has_ref else None
+                    y_ref = _series(ref_df, key) if is_auto else None
 
 
 
@@ -1276,7 +1254,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                 # 1. Manual / Reference trace (solid green)
 
-                if has_ref and y_ref is not None and np.isfinite(y_ref).any():
+                if is_auto and y_ref is not None and np.isfinite(y_ref).any():
 
                     valid_m = np.isfinite(t_ref) & np.isfinite(y_ref)
 
@@ -1304,7 +1282,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                         ax.fill_between(tm_v, y_lower, y_upper, color=fill_color, alpha=0.35,
 
-                                        label=f"Tolerance (±{tol:g} {unit})")
+                                        label=f"Tolerance (Â±{tol:g} {unit})")
 
                         ax.plot(tm_v, y_upper, color="green", linestyle="--", linewidth=0.9, alpha=0.7)
 
@@ -1328,27 +1306,11 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
 
 
-                elif is_auto and not has_ref and np.isfinite(y_sim).any():
-
-                    valid_s = np.isfinite(t_sim) & np.isfinite(y_sim)
-
-                    ts_v, ys_v = t_sim[valid_s], y_sim[valid_s]
-
-                    ax.plot(ts_v, ys_v, color="#0066cc", linewidth=2.0,
-
-                            label="Automatic Test (Ground)" if kind.lower() == "deceleration"
-
-                            else "Automatic Test (Flight)")
-
-                    has_data = True
-
-
-
                 # 2. Automatic Test (Sim) trace (dashed blue with open circles)
 
                 # In automatic mode for force, this represents the inverted virtual force
 
-                if has_ref and is_auto and np.isfinite(y_sim).any():
+                if is_auto and np.isfinite(y_sim).any():
 
                     valid_s = np.isfinite(t_sim) & np.isfinite(y_sim)
 
@@ -1380,7 +1342,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                     readings = [y_sim]
 
-                    if has_ref and y_ref is not None:
+                    if is_auto and y_ref is not None:
 
                         readings.append(y_ref)
 
@@ -1412,7 +1374,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                         [("Manual", ref_df, ref_legacy, t_ref), ("Automatic", sim_df, sim_legacy, t_sim)]
 
-                        if has_ref else ([("Automatic", sim_df, sim_legacy, t_sim)] if is_auto else [("Manual", sim_df, sim_legacy, t_sim)])
+                        if is_auto else [("Manual", sim_df, sim_legacy, t_sim)]
 
                     ):
 
@@ -1464,12 +1426,6 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                     ax.set_ylim(*opts["ylim"])
 
-                elif key == "height_agl_ft" and has_data:
-
-                    if np.nanmax(ys_v) < 15.0:
-
-                        ax.set_ylim(-1.0, 15.0)
-
 
 
                 ax.minorticks_on()
@@ -1491,8 +1447,6 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
                     ax.text(0.5, 0.5, "Engine RPM telemetry unavailable" if key in ("engine_rpm", "prop_rpm")
 
                             else "Ground-speed telemetry unavailable" if key == "ground_speed_kt"
-
-                            else "Height AGL telemetry unavailable (PLANE ALT ABOVE GROUND)" if key == "height_agl_ft"
 
                             else "Unavailable on this loader", ha="center", va="center",
 
@@ -1529,7 +1483,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                 from SMK_Engine_TiTt_V2_1_3_Addon import evaluate_engine_run
 
-                titt_results = evaluate_engine_run(sim_path, ref_path if has_ref else None, mode=kind.lower())
+                titt_results = evaluate_engine_run(sim_path, ref_path if is_auto else None, mode=kind.lower())
 
             except Exception as e:
 
@@ -1613,17 +1567,19 @@ def plot_aligned_comparison(csv_path, manual_csv_path=None, output_pdf_path=None
 
 
 
-    if manual_csv_path and Path(manual_csv_path).exists() and not is_engine:
+    manual_path = Path(manual_csv_path) if manual_csv_path else _find_manual_for_auto(csv_path)
 
-        _render_report(csv_path, ref_path=Path(manual_csv_path), out_path=out_path, titt_results=titt_results, metadata=metadata, selected_graphs=kwargs.get('selected_graphs'))
+    if manual_path is None or not manual_path.exists():
+
+        print("[Engine Report] No manual reference found, rendering single-run report.")
+
+        _render_report(csv_path, ref_path=None, out_path=out_path, titt_results=titt_results, metadata=metadata, selected_graphs=kwargs.get('selected_graphs'))
 
         return str(out_path)
 
 
 
-    # Automatic test: render standalone without overlaying manual reference data
-
-    _render_report(csv_path, ref_path=None, out_path=out_path, titt_results=titt_results, metadata=metadata, selected_graphs=kwargs.get('selected_graphs'))
+    _render_report(csv_path, ref_path=manual_path, out_path=out_path, titt_results=titt_results, metadata=metadata, selected_graphs=kwargs.get('selected_graphs'))
 
     return str(out_path)
 

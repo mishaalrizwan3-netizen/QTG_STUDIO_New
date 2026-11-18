@@ -11,9 +11,17 @@ datas = [(str(root/'test_suites'/'normal_climb'/'pid_source'/'SMK_IAS_PID_BRUNNE
          (str(root/'reports'/'plot_graphs.py'), 'engine_report'),
          (str(root/'plot_graphs.py'), '.')]
 datas += [(str(brunner/'src'/name), 'brunner_base/src') for name in ['replay_support.py','brunner_interface.py','p3d_simconnect_v15.py','plot_graphs.py']]
-datas += [(str(root/'test_suites'/relative), 'test_suites/'+str(Path(relative).parent)) for relative in ['_shared/engine_initialization.py','engine_acceleration/procedure.py','engine_deceleration/procedure.py']]
+datas += [(str(root/'test_suites'/relative), 'test_suites/'+str(Path(relative).parent)) for relative in ['_shared/engine_initialization.py','normal_climb/procedure.py','engine_acceleration/procedure.py','engine_deceleration/procedure.py']]
 datas += [(str(root/'test_suites'/name/'definition.json'), 'test_suites/'+name) for name in ['normal_climb','engine_acceleration','engine_deceleration']]
 datas += [(str(root/'test_suites'/'engine_deceleration'/name), 'test_suites/engine_deceleration') for name in ['initialization.json','input.json','output.json']]
+import sys
+base_tcl = Path(sys.base_prefix) / 'tcl'
+if (base_tcl / 'tcl8.6').is_dir():
+    datas += [(str(base_tcl / 'tcl8.6'), 'lib/tcl8.6'), (str(base_tcl / 'tcl8.6'), 'tcl/tcl8.6')]
+if (base_tcl / 'tk8.6').is_dir():
+    datas += [(str(base_tcl / 'tk8.6'), 'lib/tk8.6'), (str(base_tcl / 'tk8.6'), 'tcl/tk8.6')]
+if (base_tcl / 'tcl8').is_dir():
+    datas += [(str(base_tcl / 'tcl8'), 'lib/tcl8'), (str(base_tcl / 'tcl8'), 'tcl/tcl8')]
 
 binaries = [(str(brunner/'native/bin/p3d_bridge_engine_init_v1517.dll'), 'brunner_base/native/bin'),
             (str(root/'bridge/bin/qtg_p3d_bridge.dll'), 'bridge/bin'),
@@ -22,7 +30,7 @@ binaries = [(str(brunner/'native/bin/p3d_bridge_engine_init_v1517.dll'), 'brunne
 binaries += collect_dynamic_libs('numpy')
 binaries += collect_dynamic_libs('pandas')
 a = Analysis([str(root/'main.py')], pathex=[str(root)], binaries=binaries, datas=datas,
-    hiddenimports=['qtg_pid_monitor','qtg_climb_pid','winsound', 'qtg_common_engine', 'PySide6.QtGui', 'PySide6.QtCore', 'SMK_Engine_From_Climb', 'portable_self_test', 'engine_report_v2',
+    hiddenimports=['backend.multi_pid_runner','interfaces.multi_pid_transport','reports.multi_pid_report','backend.bank_pid_runner','interfaces.bank_pid_transport','reports.bank_pid_report','backend.yaw_pid','backend.yaw_pid_runner','interfaces.yaw_pid_transport','reports.yaw_pid_report','qtg_pid_monitor','qtg_climb_pid','winsound', 'qtg_common_engine', 'PySide6.QtGui', 'PySide6.QtCore', 'SMK_Engine_From_Climb', 'portable_self_test', 'engine_report_v2',
                    'plot_graphs', 'SMK_Engine_TiTt_V2_1_3_Addon', 'qtg_position_setter',
                    'numpy', 'pandas', 'PIL.ImageTk'],
     hooksconfig={'matplotlib': {'backends': ['Agg']}},

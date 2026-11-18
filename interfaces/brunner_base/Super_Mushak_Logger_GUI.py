@@ -2107,7 +2107,7 @@ class SuperMushakLoggerApp(QMainWindow):
             QApplication.processEvents()
 
             pdf_path = plot_graphs.plot_aligned_comparison(csv_path, manual_csv_path=self.active_manual_ref_path,
-                test_reference=getattr(self,"_session_context",{}).get("test_reference"), control_method=getattr(self,"control_method","replay"), validation_csv_path=getattr(self,"validation_csv",None), run_fault=getattr(self,"pid_fault",None), selected_graphs=getattr(self,"report_graphs",None), initial_conditions=getattr(self,"report_initial_conditions",None), pid_target_ias=getattr(self,"pid_conditions",{}).get("target_ias",80))
+                test_reference=getattr(self,"_session_context",{}).get("test_reference"), control_method=getattr(self,"control_method","replay"), validation_csv_path=getattr(self,"validation_csv",None), run_fault=(getattr(self,"bank_fault",None) if getattr(self,"control_method",None)=='bank_pid' else getattr(self,"pid_fault",None)), selected_graphs=getattr(self,"report_graphs",None), initial_conditions=getattr(self,"report_initial_conditions",None), pid_target_ias=getattr(self,"pid_conditions",{}).get("target_ias",80), bank_diagnostics_path=getattr(self,"_session_context",{}).get("bank_diagnostics_path"))
 
             if progress_dialog is not None:
                 progress_dialog.close()

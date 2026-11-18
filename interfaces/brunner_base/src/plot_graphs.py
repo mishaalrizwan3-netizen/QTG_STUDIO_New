@@ -428,7 +428,7 @@ def _plot_auto(ax, t_m, y_m, t_a, y_a, ylabel,
 
 
 
-def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result=None, virtual_forces=False, missing_label="-"):
+def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result=None, virtual_forces=False):
 
     date_text, time_text = _parse_stamp(source_path)
 
@@ -616,8 +616,6 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, evaluation_result
     def values(key):
 
         simv = _fmt(_safe(sim_df,key))
-        if simv == "-":
-            simv = missing_label
 
         force_axes = {"Joystick Pitch Force (N)": "Pitch", "Joystick Roll Force (N)": "Roll", "Rudder Pedal Force (N)": "Yaw"}
 
@@ -1093,6 +1091,12 @@ def _get_engine_plot_module():
     return engine_module
 
 def plot_aligned_comparison(csv_path, manual_csv_path=None, output_pdf_path=None, **kwargs):
+    if kwargs.get('control_method') == 'bank_pid':
+        from reports.bank_pid_report import report
+        return report(csv_path, output_pdf_path, **kwargs)
+    if kwargs.get('control_method') == 'yaw_pid':
+        from reports.yaw_pid_report import report
+        return report(csv_path, output_pdf_path, **kwargs)
     if _is_engine_test(csv_path, kwargs):
         try:
             engine_mod = _get_engine_plot_module()
