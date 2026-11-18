@@ -47,6 +47,7 @@ class Workflow(unittest.TestCase):
         self.clock.advance(dt); self.count+=1
         frame=dict(sequence=self.count,receipt_time=self.clock(),sim_time=self.clock(),
                    rpm=2000.,throttle=self.sim.throttle,ias_kt=90.,alt_ft=4000.,
+                   lat=32.235,lon=74.135,
                    height_agl_ft=3000.,on_ground=0.,autopilot_active=0.,
                    flaps=1.,temperature_c=15.,pitch_deg=3.,bank_deg=0.,heading_deg=48.4,
                    prop_rpm=2000.,manifold_pressure_psi=12.,vertical_speed=0.,

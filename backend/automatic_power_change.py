@@ -30,12 +30,32 @@ def selected(context):
             and context.get('test_reference') == REFERENCE)
 
 
+ALIASES = {
+    'lat': ('lat', 'plane_latitude', 'latitude'),
+    'lon': ('lon', 'plane_longitude', 'longitude'),
+    'alt_ft': ('alt_ft', 'pressure_alt', 'indicated_altitude'),
+    'ias_kt': ('ias_kt', 'airspeed_indicated', 'indicated_airspeed'),
+    'flaps': ('flaps', 'flaps_index', 'flaps_handle_index', 'measured_flaps_handle_index'),
+    'temperature_c': ('temperature_c', 'ambient_temperature_c', 'oat_c'),
+    'heading_deg': ('heading_deg', 'true_heading', 'magnetic_heading'),
+    'pitch_deg': ('pitch_deg', 'pitch_angle'),
+    'bank_deg': ('bank_deg', 'bank_angle'),
+}
+
+
 def finite(frame, key):
-    try:
-        value = float(frame[key])
-    except (KeyError, ValueError, TypeError):
+    if not isinstance(frame, dict):
         return None
-    return value if math.isfinite(value) else None
+    keys = ALIASES.get(key, (key,))
+    for k in keys:
+        if k in frame:
+            try:
+                val = float(frame[k])
+                if math.isfinite(val):
+                    return val
+            except (ValueError, TypeError):
+                pass
+    return None
 
 
 def stable(samples, cfg):
@@ -43,19 +63,19 @@ def stable(samples, cfg):
     if len(samples) < 4 or samples[-1][0] - samples[0][0] < SETTLE_S:
         return False, 'Waiting for 3 s of stable flight measurements'
     frames = [frame for _, frame in samples]
-    for name, span in (('ias_kt', 2.), ('alt_ft', 35.), ('pitch_deg', 1.5), ('bank_deg', 3.)):
+    for name, span in (('ias_kt', 5.), ('alt_ft', 70.), ('pitch_deg', 3.), ('bank_deg', 4.)):
         values = [finite(row, name) for row in frames]
         if None in values or max(values) - min(values) > span:
             return False, f'Unstable {name} (please trim/stabilize the aircraft before testing)'
     latest = frames[-1]
-    if abs(latest['ias_kt'] - cfg['ias_kt']) > 3.:
+    if abs(latest['ias_kt'] - cfg['ias_kt']) > 4.:
         return False, 'Airspeed differs from configured approach target'
-    if abs(latest['alt_ft'] - cfg['alt_ft']) > 70.:
+    if abs(latest['alt_ft'] - cfg['alt_ft']) > 80.:
         return False, 'Altitude differs from configured approach target'
-    if abs(latest['bank_deg']) > 3.:
+    if abs(latest['bank_deg']) > 5.:
         return False, 'Wings not level'
     vs = finite(latest, 'vertical_speed')
-    if vs is None or abs(vs) > 250.:
+    if vs is None or abs(vs) > 400.:
         return False, 'Aircraft is climbing or descending too fast for steady baseline'
     return True, ''
 
@@ -79,6 +99,9 @@ class AutomaticPowerDynamics:
         self.deadline = clock() + 90.
         self.latest, self.last_sequence = None, None
         self.last_sim_time, self.last_sim_advance = None, None
+        self.initialization_running = False
+        self.initial_throttle_corrected = False
+        self.start_rpm_samples = []
         self.stable_samples = []
         self.rows, self.outputs = [], []
         self.start_time = self.power_command_time = self.power_onset_time = self.power_completed_time = None
@@ -146,6 +169,8 @@ class AutomaticPowerDynamics:
         if not self.sim.wait_for_paused(3.):
             raise RuntimeError('P3D did not confirm pause')
         cfg = self.cfg
+        if not self.sim.set_initial_throttle(cfg['throttle']):
+            raise RuntimeError('P3D approach power rejected')
         if not self.sim.queue_position_airborne(alt_ft=cfg['alt_ft'], speed_kts=cfg['ias_kt'],
                                                 lat=cfg['lat'], lon=cfg['lon'],
                                                 hdg_deg=cfg['heading_deg'], pitch_deg=cfg['pitch_deg'],
@@ -153,8 +178,6 @@ class AutomaticPowerDynamics:
             raise RuntimeError('P3D initial approach position rejected')
         if not self.sim.set_initial_flaps(cfg['flaps']):
             raise RuntimeError('P3D approach flaps rejected')
-        if not self.sim.set_initial_throttle(cfg['throttle']):
-            raise RuntimeError('P3D approach power rejected')
         # Follow the existing Engine worker's weather/temperature initialization.
         from interfaces.brunner_base.src.replay_support import reference_weather_metar
         metar = reference_weather_metar(
@@ -162,12 +185,15 @@ class AutomaticPowerDynamics:
             self.sim.get_global_weather_metar())
         if not metar or not self.sim.set_global_weather_metar(metar):
             raise RuntimeError('Approach temperature/weather initialization rejected')
-        self.sim.unpause_sim()
         self.phase, self.stage = 'PREPARE', 'Initializing aircraft'
-        self.details = 'Waiting for stabilized approach flight; no PID adjustments'
+        self.details = 'Verifying aircraft position and configuration...'
         self.deadline = now + PREPARATION_TIMEOUT_S
+        self.initialization_running = False
+        self.initial_throttle_corrected = False
+        self.start_rpm_samples = []
         self.last_sim_time = frame['sim_time']
-        self.last_sim_advance = now
+        self.last_sequence = frame['sequence']
+        self.latest = frame
 
     def _record_frame(self, frame, now):
         row = {
@@ -207,7 +233,7 @@ class AutomaticPowerDynamics:
                 self.latest, self.last_sequence = frame, frame['sequence']
                 self._initialize(frame, now)
                 return
-            if frame is None or not (0. <= now - frame.get('receipt_time', -1.e6) <= 1.):
+            if frame is None or not (-0.2 <= now - frame.get('receipt_time', -1.e6) <= 1.):
                 if not self.sim.is_connected():
                     raise RuntimeError('P3D disconnected')
                 if self.phase == 'RECORD' and self.last_sample_time is not None and now - self.last_sample_time > 1.5:
@@ -223,50 +249,87 @@ class AutomaticPowerDynamics:
             if self.last_sequence is not None and frame['sequence'] < self.last_sequence:
                 raise RuntimeError('P3D measurement sequence went backwards')
             self.last_sequence, self.latest, self.last_sample_time = frame['sequence'], frame, now
-            if self.phase in ('PREPARE', 'RECORD'):
-                if self.last_sim_time is not None and frame['sim_time'] > self.last_sim_time:
-                    self.last_sim_advance = now
-                    self.last_sim_time = frame['sim_time']
-                elif now - (self.last_sim_advance or now) > 1.5:
-                    raise RuntimeError('P3D is paused or simulation time stopped advancing')
-            if self.phase in ('PREPARE', 'RECORD') and frame.get('on_ground') == 1:
-                raise RuntimeError('Aircraft is on the ground; airborne free-response test cannot continue')
-            agl = finite(frame, 'height_agl_ft')
-            if self.phase in ('PREPARE', 'RECORD') and agl is not None and agl < 300.:
-                raise RuntimeError('Aircraft too low to safely continue; recording stopped')
-            if self.phase in ('PREPARE', 'RECORD') and frame.get('autopilot_active') == 1:
+
+            if frame.get('autopilot_active') == 1:
                 raise RuntimeError('Autopilot must be OFF for an uncontrolled free-response test')
+
             if self.phase == 'PREPARE':
                 if now >= self.deadline:
-                    raise RuntimeError('Approach could not stabilize within 40 s; do not record an invalid free response')
-                if frame['rpm'] < 300. or abs(frame['throttle'] - self.cfg['throttle']) > 2.5:
-                    self.stable_samples = []
-                    self.details = 'Waiting for engine power to match approach setting'
+                    raise RuntimeError('Initial approach conditions not confirmed: ' + self.details)
+                throttle_mismatch = abs(frame['throttle'] - self.cfg['throttle']) > 2.5
+                if throttle_mismatch and not self.initialization_running and not self.initial_throttle_corrected:
+                    if not self.sim.set_initial_throttle(self.cfg['throttle']):
+                        raise RuntimeError('Approach throttle reapplication rejected')
+                    self.initial_throttle_corrected = True
+                if not self.initialization_running and not throttle_mismatch:
+                    self.sim.unpause_sim()
+                    self.initialization_running = True
+                    self.details = 'Advancing simulator to apply initial position and weather...'
                     return
-                if finite(frame, 'flaps') is None or abs(frame['flaps'] - self.cfg['flaps']) > 0.1:
-                    self.stable_samples = []
-                    self.details = 'Waiting for configured flap position'
+
+                checks = [
+                    ('alt_ft', 50.), ('ias_kt', 5.),
+                    ('lat', .001), ('lon', .001), ('flaps', .1),
+                    ('temperature_c', 3.), ('heading_deg', 3.),
+                    ('pitch_deg', 3.), ('bank_deg', 3.),
+                ]
+                mismatches = []
+                for key, tolerance in checks:
+                    val = finite(frame, key)
+                    if val is None:
+                        mismatches.append(f'{key}: N/A')
+                    else:
+                        target = self.cfg[key]
+                        diff = abs((val - target + 180.) % 360. - 180.) if key == 'heading_deg' else abs(val - target)
+                        if diff > tolerance:
+                            mismatches.append(f'{key}: {val:.1f} vs {target:.1f}')
+                if throttle_mismatch:
+                    mismatches.append(f'throttle: {frame["throttle"]:.1f}% vs {self.cfg["throttle"]:.1f}%')
+                if bool(frame.get('on_ground', 0)):
+                    mismatches.append('aircraft is not airborne')
+                if frame['rpm'] < 300.:
+                    mismatches.append('engine not running')
+
+                if mismatches:
+                    self.start_rpm_samples.clear()
+                    self.details = 'Waiting for: ' + ', '.join(mismatches)
                     return
-                ambient = finite(frame, 'temperature_c')
-                if ambient is None or abs(ambient - self.cfg['temperature_c']) > 3.:
-                    self.stable_samples = []
-                    self.details = 'Waiting for configured approach temperature'
+
+                self.start_rpm_samples.append((now, frame['rpm']))
+                self.start_rpm_samples = [(stamp, rpm) for stamp, rpm in self.start_rpm_samples if stamp >= now - 2.0]
+                settled = (len(self.start_rpm_samples) >= 3
+                           and now - self.start_rpm_samples[0][0] >= 2.0
+                           and max(rpm for _, rpm in self.start_rpm_samples) - min(rpm for _, rpm in self.start_rpm_samples) <= 150.)
+                if not settled:
+                    self.details = 'Waiting for engine RPM to settle before recording'
                     return
-                self.stable_samples.append((now, dict(frame)))
-                self.stable_samples = [(t, f) for t, f in self.stable_samples if t >= now - (SETTLE_S + .3)]
-                ok, reason = stable(self.stable_samples, self.cfg)
-                self.details = reason or 'Approach stabilized; 5 s baseline available after Start Recording'
-                if ok:
-                    self.sim.pause_sim()
-                    if not self.sim.wait_for_paused(3.):
-                        raise RuntimeError('P3D did not confirm pause at READY TO RECORD')
-                    self.phase, self.stage = 'READY', 'READY TO RECORD'
+
+                # Initial conditions verified. Pause P3D and declare READY TO RECORD.
+                self.sim.pause_sim()
+                if not self.sim.wait_for_paused(3.0):
+                    raise RuntimeError('Simulator did not confirm pause after initialization')
+                self.phase, self.stage = 'READY', 'READY TO RECORD'
+                self.details = 'Initial conditions verified. Ready to record 5 s baseline and power step.'
                 return
+
             if self.phase == 'READY':
                 if abs(frame['throttle'] - self.cfg['throttle']) > 2.5:
                     raise RuntimeError('Starting approach throttle changed; initialize again')
                 return
+
             if self.phase == 'RECORD':
+                if self.last_sim_time is not None and frame['sim_time'] > self.last_sim_time:
+                    self.last_sim_advance = now
+                    self.last_sim_time = frame['sim_time']
+                elif self.last_sim_advance is not None and now - self.last_sim_advance > 2.0:
+                    raise RuntimeError('P3D is paused or simulation time stopped advancing')
+
+                if frame.get('on_ground') == 1:
+                    raise RuntimeError('Aircraft is on the ground; airborne free-response test cannot continue')
+                agl = finite(frame, 'height_agl_ft')
+                if agl is not None and agl < 300.:
+                    raise RuntimeError('Aircraft too low to safely continue; recording stopped')
+
                 if now - self.start_time > MAX_RECORDING_S:
                     raise RuntimeError('Power Change Dynamics exceeded its bounded recording window')
                 self._record_frame(frame, now)
@@ -280,7 +343,7 @@ class AutomaticPowerDynamics:
                             ias_kt=row['Indicated Airspeed (kts)'], alt_ft=row['Altitude MSL (ft)'],
                             pitch_deg=row['Pitch Angle (deg)'], bank_deg=row['Bank Angle (deg)'],
                             vertical_speed=row['Rate of Climb/Descent (fpm)']))
-                                    for row in self.rows if row['Time (s)'] >= elapsed-SETTLE_S]
+                                    for row in self.rows if row['Time (s)'] >= elapsed - SETTLE_S]
                         ready, why = stable(baseline, self.cfg)
                         if not ready:
                             raise RuntimeError('Baseline not stable: ' + why)

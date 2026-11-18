@@ -161,55 +161,58 @@ class ConditionsTest(unittest.TestCase):
 
 class PanelTest(unittest.TestCase):
     def test_password_visibility_fields_and_set(self):
+        import tempfile
         import tkinter as tk
         import main
         root = tk.Tk()
         root.withdraw()
         try:
-            host = SimpleNamespace(settings_panel=tk.Frame(root), _work_canvas=tk.Canvas(root),
-                                   _test_settings={}, recording_active=False, p3d_paused=False)
-            host._register_scroll_area = lambda canvas: None
-            host._manual_conditions_changed = lambda reference: None
-            host._work_canvas.pack()
-            host._label = lambda parent,text,size=11,color=None,weight='normal',**kw: tk.Label(parent,text=text,**kw)
-            host._build_settings_panel = lambda spec: main.App._build_settings_panel(host,spec)
-            host._open_test_password_dialog = lambda i: main.App._open_test_password_dialog(host,i)
-            host._lock_test_settings = lambda spec: main.App._lock_test_settings(host,spec)
-            host._apply_test_settings = lambda spec: main.App._apply_test_settings(host,spec)
-            host._fly_to_initial_conditions = lambda spec,**kw: main.App._fly_to_initial_conditions(host,spec,**kw)
-            host.update_idletasks = root.update_idletasks
-            spec = main.TESTS[2]
-            host._build_settings_panel(spec)
-            self.assertEqual(host.settings_panel.winfo_manager(), '')
-            for password in (None, 'wrong'):
-                with patch.object(main.simpledialog,'askstring',return_value=password), patch.object(main.messagebox,'showerror'):
-                    host._open_test_password_dialog(2)
+            with tempfile.TemporaryDirectory() as tmp_root, \
+                 patch.object(main, 'RESULTS_ROOT', Path(tmp_root)):
+                host = SimpleNamespace(settings_panel=tk.Frame(root), _work_canvas=tk.Canvas(root),
+                                       _test_settings={}, recording_active=False, p3d_paused=False)
+                host._register_scroll_area = lambda canvas: None
+                host._manual_conditions_changed = lambda reference: None
+                host._work_canvas.pack()
+                host._label = lambda parent,text,size=11,color=None,weight='normal',**kw: tk.Label(parent,text=text,**kw)
+                host._build_settings_panel = lambda spec: main.App._build_settings_panel(host,spec)
+                host._open_test_password_dialog = lambda i: main.App._open_test_password_dialog(host,i)
+                host._lock_test_settings = lambda spec: main.App._lock_test_settings(host,spec)
+                host._apply_test_settings = lambda spec: main.App._apply_test_settings(host,spec)
+                host._fly_to_initial_conditions = lambda spec,**kw: main.App._fly_to_initial_conditions(host,spec,**kw)
+                host.update_idletasks = root.update_idletasks
+                spec = main.TESTS[2]
+                host._build_settings_panel(spec)
                 self.assertEqual(host.settings_panel.winfo_manager(), '')
-            with patch.object(main.simpledialog,'askstring',return_value=main.TEST_ADMIN_PASSWORD):
-                host._open_test_password_dialog(2)
-            self.assertEqual(host.settings_panel.winfo_manager(), 'pack')
-            fields,graphs = host._test_settings[spec.reference]
-            self.assertIn('Heading[deg]', fields)
-            self.assertIn('Pitch[deg]', fields)
-            self.assertIn('Bank[deg]', fields)
-            self.assertNotIn('Wind direction[deg]', fields)
-            self.assertIn('Latitude[deg]', fields)
-            self.assertIn('Longitude[deg]', fields)
-            self.assertEqual(len(graphs),25)
-            self.assertNotIn('Wind speed[kt]', fields)
-            host._launch_common_test = Mock()
-            self.assertTrue(host._fly_to_initial_conditions(spec))
-            host._launch_common_test.assert_called_once_with('manual', spec, force_initialize=True)
-            fields['Alt[ft]'].set('')
-            self.assertTrue(host._fly_to_initial_conditions(spec))
-            self.assertEqual(fields['Alt[ft]'].get(), '2000')
-            fields['Latitude[deg]'].set('91')
-            host._launch_common_test.reset_mock()
-            with patch.object(main.messagebox,'showerror'):
-                self.assertFalse(host._fly_to_initial_conditions(spec))
-            host._launch_common_test.assert_not_called()
-            host._lock_test_settings(spec)
-            self.assertEqual(host.settings_panel.winfo_manager(), '')
+                for password in (None, 'wrong'):
+                    with patch.object(main.simpledialog,'askstring',return_value=password), patch.object(main.messagebox,'showerror'):
+                        host._open_test_password_dialog(2)
+                    self.assertEqual(host.settings_panel.winfo_manager(), '')
+                with patch.object(main.simpledialog,'askstring',return_value=main.TEST_ADMIN_PASSWORD):
+                    host._open_test_password_dialog(2)
+                self.assertEqual(host.settings_panel.winfo_manager(), 'pack')
+                fields,graphs = host._test_settings[spec.reference]
+                self.assertIn('Heading[deg]', fields)
+                self.assertIn('Pitch[deg]', fields)
+                self.assertIn('Bank[deg]', fields)
+                self.assertNotIn('Wind direction[deg]', fields)
+                self.assertIn('Latitude[deg]', fields)
+                self.assertIn('Longitude[deg]', fields)
+                self.assertEqual(len(graphs),25)
+                self.assertNotIn('Wind speed[kt]', fields)
+                host._launch_common_test = Mock()
+                self.assertTrue(host._fly_to_initial_conditions(spec))
+                host._launch_common_test.assert_called_once_with('manual', spec, force_initialize=True)
+                fields['Alt[ft]'].set('')
+                self.assertTrue(host._fly_to_initial_conditions(spec))
+                self.assertEqual(fields['Alt[ft]'].get(), '2000')
+                fields['Latitude[deg]'].set('91')
+                host._launch_common_test.reset_mock()
+                with patch.object(main.messagebox,'showerror'):
+                    self.assertFalse(host._fly_to_initial_conditions(spec))
+                host._launch_common_test.assert_not_called()
+                host._lock_test_settings(spec)
+                self.assertEqual(host.settings_panel.winfo_manager(), '')
         finally:
             root.destroy()
 
