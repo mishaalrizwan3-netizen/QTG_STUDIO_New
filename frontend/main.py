@@ -3357,7 +3357,8 @@ class App(tk.Tk):
                 self._visible_condition_fields[spec.reference] = load_visible_fields(
                     RESULTS_ROOT / 'initial_condition_settings', spec.reference)
             except (OSError, ValueError) as exc:
-                messagebox.showerror('Saved initial conditions', str(exc), parent=self)
+                parent_opt = {"parent": self} if hasattr(self, "tk") else {}
+                messagebox.showerror('Saved initial conditions', str(exc), **parent_opt)
                 self._visible_condition_fields[spec.reference] = list(FIELDS)
             trim_keys = {"trim_position_rad", "trim_indicator", "trim_value_pct", "trim_elevator_surface_rad"}
             channels = (PDF_CHANNELS if spec.reference == '2.a.(4)' else
@@ -3633,7 +3634,8 @@ class App(tk.Tk):
             spec.pdf_graphs = [(label, column) for label, column, var in graphs if var.get()]
             return True
         except (ValueError, OSError) as exc:
-            messagebox.showerror("Invalid initial conditions", str(exc), parent=self)
+            parent_opt = {"parent": self} if hasattr(self, "tk") else {}
+            messagebox.showerror("Invalid initial conditions", str(exc), **parent_opt)
             return False
 
     # ======================== HARDWARE CONNECTIONS & POLLING ===========================

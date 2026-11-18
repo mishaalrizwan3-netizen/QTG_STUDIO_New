@@ -53,6 +53,12 @@ TESTS = [
              "Record cockpit throttle, propeller and mixture lever positions with simulator engine parameters.",
              "Flt cond: Ground | IAS[kts]: 0",
              "± 5° TLA or ± 3% N1 or ± 0.03 EPR or ± 3% torque; ± 2 cm for non-angular propeller levers; compare with aircraft validation data"),
+    TestSpec("2.b.(11)", "Power change dynamics (longitudinal c.(1))", "Longitudinal Handling", 74,
+             "Record the uncontrolled aircraft response to a step from approach/level-flight power to go-around power.",
+             "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 1 | "
+             "Latitude[deg]: 32.235 | Longitude[deg]: 74.135 | Heading[deg]: 48.4 | "
+             "Pitch[deg]: 3 | Bank[deg]: 0 | Throttle[%]: 50 | Temperature[C]: 15",
+             "± 3 kt airspeed | ± 100 ft altitude | ± 1.5° or ± 20% pitch angle (against approved reference)"),
 
     # --- Longitudinal Handling (10 tests) ---
     TestSpec("2.b.(1)", "Longitudinal trim", "Longitudinal Handling", 69,
@@ -121,17 +127,6 @@ TESTS = [
              "", "Continuous horizontal FOV >= 150º (or 180º for level D) | Vertical FOV >= 30º (± 2º tolerance)"),
     TestSpec("4.c.(1)", "Visual ground / runway alignment and spatial geometry", "Visual System Tests", 90,
              "To demonstrate that the visual System ground segment visible to the pilot at a given height and RVR is similar to this class of airplane.",
-             "", "Runway visual scene alignment within ± 1º heading and ± 0.5º glidepath alignment at decision height"),
-
-    # Separate internal reference: 2.c.(1) already names Roll Response in this catalog.
-    # Source requirement: CS-FSTD(A) Issue 2, longitudinal c.(1), Power Change Dynamics.
-    # The suffix 2.b.(11) is a QTG Studio internal identifier, NOT an EASA test code.
-    TestSpec("2.b.(11)", "Power change dynamics (longitudinal c.(1))", "Longitudinal Handling", 74,
-             "Record the uncontrolled aircraft response to a step from approach/level-flight power to go-around power.",
-             "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 1 | "
-             "Latitude[deg]: 32.235 | Longitude[deg]: 74.135 | Heading[deg]: 48.4 | "
-             "Pitch[deg]: 3 | Bank[deg]: 0 | Throttle[%]: 50 | Temperature[C]: 15",
-             "± 3 kt airspeed | ± 100 ft altitude | ± 1.5° or ± 20% pitch angle (against approved reference)") 
-
+             "", "Runway visual scene alignment within ± 1º heading and ± 0.5º glidepath alignment at decision height")
 ]
 
