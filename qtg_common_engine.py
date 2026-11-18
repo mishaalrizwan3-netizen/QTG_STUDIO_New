@@ -283,7 +283,7 @@ from backend.artifacts import test_directory, named_result
 from backend.initializer import apply_manual_conditions
 
 
-def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False, active_pids=None, target_heading_mag=None):
+def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False, active_pids=None, target_heading_mag=None, target_bank=None, **extra_options):
     if mode not in ('manual','auto'): raise ValueError('Unknown test mode')
     if control_method == 'engine_step' and mode != 'auto':
         raise ValueError('Engine throttle step requires Automatic Testing')
@@ -338,7 +338,9 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
              'initialization_policy':'operator settings for Manual/PID; selected Manual t0 for Recorded Replay'}
     if active_pids:
         context['active_pids'] = dict(active_pids)
-        context['target_heading_mag'] = float(target_heading_mag if target_heading_mag is not None else initial_conditions['heading_deg'])
+        context['target_heading_mag'] = float(target_heading_mag if target_heading_mag is not None else ((initial_conditions or {}).get('heading_deg', 0.0)))
+    if target_bank is not None:
+        context['target_bank'] = float(target_bank)
     if configuration_revision is not None:
         context['configuration_revision'] = configuration_revision
     if operator_initiated_universal_manual is True and spec.reference == '1.f.(2)' and mode == 'manual':
@@ -1018,17 +1020,20 @@ def worker_class(base,context,publish):
                 self._control_method=method
                 self.control_method=method
                 self._multi_pid_started = False
-                if method == 'multi_pid':
+                if method == 'multi_pid' or command.get('pid_conditions'):
                     self.pid_conditions = command.get('pid_conditions') or {'target_ias': 80.0}
                 self.validation_csv=command.get('validation_csv')
                 context.update(control_method=method,pid_conditions=command.get('pid_conditions'),validation_csv=command.get('validation_csv'),mode=mode,reference_csv=reference,test_reference=command.get('test_reference',context['test_reference']),
                                title=command.get('title',context['title']),duration_s=duration)
-                if method == 'multi_pid':
+                if command.get('active_pids'):
                     context['active_pids'] = dict(command['active_pids'])
-                    context['target_heading_mag'] = float(command.get('target_heading_mag', conditions['heading_deg']))
+                    context['target_heading_mag'] = float(command.get('target_heading_mag', conditions.get('heading_deg', 0.0) if conditions else 0.0))
+                    if 'target_bank' in command:
+                        context['target_bank'] = float(command['target_bank'])
                 else:
                     context.pop('active_pids', None)
                     context.pop('target_heading_mag', None)
+                    context.pop('target_bank', None)
                 context['operator_initiated_universal_manual'] = (command.get('operator_initiated_universal_manual') is True and context['test_reference'] == '1.f.(2)' and mode == 'manual')
                 context['configuration_revision'] = command.get('configuration_revision')
                 context.pop('gui_configuration_invalidated', None)

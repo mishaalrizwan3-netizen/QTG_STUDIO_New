@@ -63,6 +63,9 @@ class AutomaticStall(AutomaticControl):
         super().__init__(dict(context, test_reference='2.a.(1)', control_method='static_control'),
                          sim, brunner, publish, clock=clock, live_hardware=True)
         self.context = dict(context)
+        from backend.pid_assist import PidAssist
+        pitch_mask = getattr(self.brunner, 'AXIS_PITCH', 0x01) if self.brunner else 0x01
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=pitch_mask)
         self.test_ref = REF
         self.reader = reader
         self.cycle = StallWarningCycle(max_age_s=1.0)

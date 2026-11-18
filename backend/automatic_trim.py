@@ -58,6 +58,8 @@ class AutomaticTrim(AutomaticControl):
         synthetic = dict(context, test_reference='2.a.(1)', control_method='static_control')
         super().__init__(synthetic, sim, brunner, publish, clock=clock, live_hardware=False, brake_reader=brake_reader)
         self.context = dict(context)
+        from backend.pid_assist import PidAssist
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=0)
         self.test_ref = REF
         self.axis_name = 'Pitch trim'
         self.reader = reader

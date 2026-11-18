@@ -74,11 +74,17 @@ class PidAssist:
         except (ValueError, TypeError):
             self.target_ias = 80.0
 
-        raw_hdg = self.context.get('target_heading_mag') or init_cond.get('heading_deg') or 0.0
+        raw_hdg = pid_cond.get('target_heading') or self.context.get('target_heading_mag') or init_cond.get('heading_deg') or 0.0
         try:
             self.target_hdg = float(raw_hdg) % 360.0
         except (ValueError, TypeError):
             self.target_hdg = 0.0
+
+        raw_bank = pid_cond.get('target_bank') or self.context.get('target_bank') or init_cond.get('bank_deg') or 0.0
+        try:
+            self.target_bank = float(raw_bank)
+        except (ValueError, TypeError):
+            self.target_bank = 0.0
 
         self.last_time: Optional[float] = None
         self.latest_commands: Dict[str, float] = {}
@@ -143,7 +149,7 @@ class PidAssist:
             if self.heading_ctrl and math.isfinite(hdg):
                 cmd_bank = self.heading_ctrl.update(self.target_hdg, hdg, yaw_rate, dt)
             else:
-                cmd_bank = 0.0  # Wings level
+                cmd_bank = self.target_bank
             roll_cmd = self.bank_pid.update(cmd_bank, bank, dt)
             roll_cmd = max(-0.65, min(0.65, roll_cmd))
             commands['roll'] = roll_cmd

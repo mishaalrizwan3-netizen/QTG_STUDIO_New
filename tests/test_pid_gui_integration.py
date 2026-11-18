@@ -127,6 +127,65 @@ class PidGuiIntegrationTests(unittest.TestCase):
         self.assertNotIn('pitch', cmds)
         mock_brunner.write_setting.assert_called_with(0x02, 0x80, 'f', cmds['roll'])
 
+    def test_custom_pid_targets_propagate_to_engine_and_assist(self):
+        from backend.pid_assist import PidAssist
+        from unittest.mock import Mock
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.dict(os.environ, {'QTG_OFFLINE_GUI_CHECK': '1'}), \
+                patch.object(gui, 'RESULTS_ROOT', Path(folder)), \
+                patch.object(engine.subprocess, 'Popen'):
+            app = gui.App()
+            app.withdraw()
+            try:
+                ref = '2.a.(1)'
+                index = next(i for i, spec in enumerate(gui.TESTS) if spec.reference == ref)
+                app.select_test(index)
+                app._settings_unlocked = {ref}
+                app._build_settings_panel(gui.TESTS[index])
+
+                # Verify default target entries exist and match defaults
+                self.assertEqual(app._pid_targets[ref].get(), '80')
+                self.assertEqual(app._pid_targets_bank[ref].get(), '0.0')
+
+                # Populate initial conditions required for automated flight execution
+                for key, val in [('Flt cond', 'Clean'), ('Alt[ft]', '2000'), ('IAS[kts]', '80'),
+                                 ('Flaps', '0'), ('Latitude[deg]', '32.235'), ('Longitude[deg]', '74.135'),
+                                 ('Heading[deg]', '0'), ('Pitch[deg]', '0'), ('Bank[deg]', '0'),
+                                 ('Throttle[%]', '80'), ('Temperature[C]', '15')]:
+                    app._test_settings[ref][0][key].set(val)
+
+                # Set custom target values in GUI text boxes
+                app._pid_targets[ref].set('95.0')
+                app._pid_targets_bank[ref].set('12.0')
+                app._pid_targets_heading[ref].set('270.0')
+                app._pid_axis_checks[ref]['bank'].set(True)
+
+                app._launch_common_test('auto', gui.TESTS[index])
+
+                launched_context = getattr(app, '_common_context', {})
+                self.assertEqual(launched_context['active_pids'], {'airspeed': False, 'bank': True, 'yaw': False})
+                self.assertEqual(launched_context['pid_conditions']['target_ias'], 95.0)
+                self.assertEqual(launched_context['pid_conditions']['target_bank'], 12.0)
+                self.assertEqual(launched_context['pid_conditions']['target_heading'], 270.0)
+                self.assertEqual(launched_context['target_bank'], 12.0)
+                self.assertEqual(launched_context['target_heading_mag'], 270.0)
+
+                # Verify PidAssist consumes custom targets
+                assist = PidAssist(launched_context, owned_axis_mask=0x01)
+                self.assertEqual(assist.target_ias, 95.0)
+                self.assertEqual(assist.target_bank, 12.0)
+                self.assertEqual(assist.target_hdg, 270.0)
+
+                mock_brunner = Mock()
+                mock_brunner.sock = True
+                telemetry = {'bank_deg': 0.0, 'heading_deg': 270.0, 'ias_kt': 95.0, 'pitch_deg': 0.0}
+                cmds = assist.update(1.0, telemetry, mock_brunner)
+                self.assertIn('roll', cmds)
+                self.assertGreater(cmds['roll'], 0.0)
+            finally:
+                app.destroy()
+
 
 
 if __name__ == '__main__':

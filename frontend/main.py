@@ -1051,6 +1051,8 @@ class App(tk.Tk):
             messagebox.showerror('Saved application preferences', str(exc), parent=self)
         self._automatic_methods = {spec.reference: self._preference_var(spec.reference, 'automatic_method', 'Recorded Replay') for spec in TESTS}
         self._pid_targets = {spec.reference: tk.StringVar(value="80") for spec in TESTS}
+        self._pid_targets_bank = {spec.reference: tk.StringVar(value="0.0") for spec in TESTS}
+        self._pid_targets_heading = {spec.reference: tk.StringVar(value="0.0") for spec in TESTS}
         self._pid_validation = {spec.reference: self._preference_var(spec.reference, 'pid_validation', '') for spec in TESTS}
 
         self._set_style()
@@ -2351,6 +2353,18 @@ class App(tk.Tk):
             if method == "pid":
                 fields, _ = self._test_settings[spec.reference]
                 from qtg_climb_pid import options
+                try:
+                    target_ias_val = float(self._pid_targets[spec.reference].get() or 80.0)
+                except (ValueError, TypeError):
+                    target_ias_val = 80.0
+                try:
+                    target_bank_val = float(self._pid_targets_bank[spec.reference].get() or 0.0)
+                except (ValueError, TypeError):
+                    target_bank_val = 0.0
+                try:
+                    target_hdg_val = float(self._pid_targets_heading[spec.reference].get() or (fields["Heading[deg]"].get() if "Heading[deg]" in fields else 0.0))
+                except (ValueError, TypeError):
+                    target_hdg_val = 0.0
                 conditions = options(dict(
                     alt_ft=float(fields["Alt[ft]"].get()),
                     ias_kt=float(fields["IAS[kts]"].get()),
@@ -2362,13 +2376,32 @@ class App(tk.Tk):
                     flaps=float(fields["Flaps"].get()),
                     throttle=float(fields["Throttle[%]"].get()),
                     temperature_c=float(fields["Temperature[C]"].get()),
-                    target_ias=80.0,
+                    target_ias=target_ias_val,
+                    target_bank=target_bank_val,
+                    target_heading=target_hdg_val,
                 ))
                 validation = self._pid_validation[spec.reference].get().strip() or None
                 if validation and not Path(validation).is_file():
                     raise ValueError("Validation dataset not found.")
-            elif method == "multi_pid":
-                conditions = {'target_ias': 80.0}
+            elif method == "multi_pid" or pid_requested:
+                try:
+                    target_ias_val = float(self._pid_targets[spec.reference].get() or 80.0)
+                except (ValueError, TypeError):
+                    target_ias_val = 80.0
+                try:
+                    target_bank_val = float(self._pid_targets_bank[spec.reference].get() or 0.0)
+                except (ValueError, TypeError):
+                    target_bank_val = 0.0
+                try:
+                    target_hdg_val = float(self._pid_targets_heading[spec.reference].get() or (initial['heading_deg'] if initial else 0.0))
+                except (ValueError, TypeError):
+                    target_hdg_val = float(initial['heading_deg'] if initial else 0.0)
+
+                conditions = {
+                    'target_ias': target_ias_val,
+                    'target_bank': target_bank_val,
+                    'target_heading': target_hdg_val,
+                }
             from backend.engine_initialization_adapter import requested
             universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic or method == "multi_pid") and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
@@ -2379,9 +2412,10 @@ class App(tk.Tk):
                 reference=validate_reference(reference)
             guarded = universal
             binding_options = {}
-            if method == "multi_pid":
+            if method == "multi_pid" or pid_requested:
                 binding_options['active_pids'] = selected_axes
-                binding_options['target_heading_mag'] = initial['heading_deg']
+                binding_options['target_heading_mag'] = conditions.get('target_heading', initial['heading_deg'] if initial else 0.0) if conditions else (initial['heading_deg'] if initial else 0.0)
+                binding_options['target_bank'] = conditions.get('target_bank', 0.0) if conditions else 0.0
             if guarded:
                 from uuid import uuid4
                 binding_options['configuration_revision'] = uuid4().hex
@@ -3525,20 +3559,43 @@ class App(tk.Tk):
         method_combo.bind("<<ComboboxSelected>>",lambda event:self._sync_common_duration(spec))
         if not hasattr(self, '_pid_axis_checks'):
             self._pid_axis_checks = {}
+        if not hasattr(self, '_pid_targets'):
+            self._pid_targets = {s.reference: tk.StringVar(value="80") for s in TESTS}
+        if not hasattr(self, '_pid_targets_bank'):
+            self._pid_targets_bank = {s.reference: tk.StringVar(value="0.0") for s in TESTS}
+        if not hasattr(self, '_pid_targets_heading'):
+            self._pid_targets_heading = {s.reference: tk.StringVar(value="0.0") for s in TESTS}
+
         checks = self._pid_axis_checks.setdefault(spec.reference, {
             key: tk.BooleanVar(value=False) for key in ('airspeed', 'bank', 'yaw')})
+        self._pid_targets.setdefault(spec.reference, tk.StringVar(value="80"))
+        self._pid_targets_bank.setdefault(spec.reference, tk.StringVar(value="0.0"))
+        self._pid_targets_heading.setdefault(spec.reference, tk.StringVar(value="0.0"))
+        spec_defs = getattr(self, '_test_defaults', {}).get(spec.reference, {})
+        if self._pid_targets_heading[spec.reference].get() in ('', '0.0') and spec_defs.get('Heading[deg]'):
+            self._pid_targets_heading[spec.reference].set(spec_defs['Heading[deg]'])
+
         self._label(box, 'Run selected PIDs in Automatic', 9, COL['dim']).pack(anchor='w', pady=(7, 2))
-        for key, label in (('airspeed', 'Airspeed PID'), ('bank', 'Bank PID'), ('yaw', 'Yaw PID')):
-            tk.Checkbutton(box, text=label, variable=checks[key], bg='#FFFFFF',
-                activebackground='#FFFFFF', anchor='w').pack(fill='x')
+        pid_configs = (
+            ('airspeed', 'Airspeed PID', self._pid_targets[spec.reference], 'Target IAS [kt]'),
+            ('bank', 'Bank PID', self._pid_targets_bank[spec.reference], 'Target Bank [deg]'),
+            ('yaw', 'Yaw PID', self._pid_targets_heading[spec.reference], 'Target Heading [deg]'),
+        )
+        for key, label, target_var, target_label in pid_configs:
+            row = tk.Frame(box, bg='#FFFFFF')
+            row.pack(fill='x', pady=(2, 1))
+            tk.Checkbutton(row, text=label, variable=checks[key], bg='#FFFFFF',
+                activebackground='#FFFFFF', anchor='w',
+                state="normal" if unlocked else "disabled").pack(side='left')
+            t_row = tk.Frame(box, bg='#FFFFFF')
+            t_row.pack(fill='x', padx=(20, 0), pady=(0, 3))
+            self._label(t_row, target_label, 8, COL['dim']).pack(side='left')
+            ttk.Entry(t_row, textvariable=target_var, width=8,
+                      state="normal" if unlocked else "disabled").pack(side='right')
+
         if spec.reference=="1.c.(1)":
-            if not hasattr(self,"_pid_targets"): self._pid_targets={}
             if not hasattr(self,"_pid_validation"): self._pid_validation={}
-            self._pid_targets.setdefault(spec.reference,tk.StringVar(value="80"))
-            self._pid_targets[spec.reference].set("80")
             self._pid_validation.setdefault(spec.reference,tk.StringVar())
-            self._label(box,"PID target IAS [kt]",9,COL["dim"]).pack(anchor="w",pady=(7,2))
-            ttk.Entry(box,textvariable=self._pid_targets[spec.reference],state="disabled").pack(fill="x")
             self._label(box,"PID validation dataset (CSV)",9,COL["dim"]).pack(anchor="w",pady=(7,2))
             ttk.Entry(box,textvariable=self._pid_validation[spec.reference],state="normal" if unlocked else "disabled").pack(fill="x")
             def browse_validation():

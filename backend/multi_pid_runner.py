@@ -142,7 +142,7 @@ class MultiPidStabilizationGate:
     def elapsed_stable(self, now: float) -> float:
         return 0.0 if self.since is None else max(0.0, now - self.since)
 
-    def is_currently_within_tolerances(self, ias: float, bank: float, hdg: float, target_ias: float, target_hdg: float) -> bool:
+    def is_currently_within_tolerances(self, ias: float, bank: float, hdg: float, target_ias: float, target_hdg: float, target_bank: float = 0.0) -> bool:
         if self.pitch_enabled:
             if not math.isfinite(ias) or abs(ias - target_ias) > self.ias_tol:
                 return False
@@ -154,13 +154,13 @@ class MultiPidStabilizationGate:
             if abs(hdg_err) > self.hdg_tol or abs(bank) > self.bank_tol:
                 return False
         elif self.bank_enabled:
-            if not math.isfinite(bank) or abs(bank) > self.bank_tol:
+            if not math.isfinite(bank) or abs(bank - target_bank) > self.bank_tol:
                 return False
 
         return True
 
-    def update(self, now: float, ias: float, bank: float, hdg: float, target_ias: float, target_hdg: float) -> bool:
-        within = self.is_currently_within_tolerances(ias, bank, hdg, target_ias, target_hdg)
+    def update(self, now: float, ias: float, bank: float, hdg: float, target_ias: float, target_hdg: float, target_bank: float = 0.0) -> bool:
+        within = self.is_currently_within_tolerances(ias, bank, hdg, target_ias, target_hdg, target_bank)
         if not within:
             self.since = None
             return False
@@ -229,6 +229,8 @@ def loop(window, base, owner_alive=None):
     target_hdg = float(context.get('target_heading_mag',
                         (context.get('initial_conditions') or {}).get('heading_deg', 0.0)))
     target_hdg = target_hdg % 360.0
+    target_bank = float((context.get('pid_conditions') or {}).get('target_bank',
+                         context.get('target_bank', 0.0)))
 
     hold_duration_s = float(context.get('multi_pid_hold_sec', 5.0))
 
@@ -348,7 +350,7 @@ def loop(window, base, owner_alive=None):
                 if yaw_enabled:
                     demanded_bank = heading_ctrl.update(target_hdg, actual_hdg, yaw_rate, dt)
                 else:
-                    demanded_bank = 0.0
+                    demanded_bank = target_bank
 
                 captured = bank_handoff.update(
                     bank_enabled, yaw_enabled, target_hdg, actual_hdg, actual_bank,
@@ -362,7 +364,7 @@ def loop(window, base, owner_alive=None):
                 elif yaw_enabled:
                     effective_target_bank = demanded_bank
                 elif bank_enabled:
-                    effective_target_bank = 0.0
+                    effective_target_bank = target_bank
                 else:
                     effective_target_bank = 0.0
 
@@ -414,7 +416,7 @@ def loop(window, base, owner_alive=None):
 
             # Stabilization Phase & 5-Second Gate
             if phase == 'stabilizing':
-                stable = gate.update(now, actual_ias, actual_bank, actual_hdg, target_ias, target_hdg)
+                stable = gate.update(now, actual_ias, actual_bank, actual_hdg, target_ias, target_hdg, target_bank)
                 stable_elapsed = gate.elapsed_stable(now)
 
                 if stable:

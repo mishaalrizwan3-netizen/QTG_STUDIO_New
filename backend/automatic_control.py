@@ -155,7 +155,7 @@ class AutomaticControl:
         self.deadline = clock() + self.startup_timeout
 
         from backend.pid_assist import PidAssist
-        self.pid_assist = PidAssist(self.context, owned_axis_mask=self.axis_mask if self.live_hardware else 0)
+        self.pid_assist = PidAssist(self.context, owned_axis_mask=self.axis_mask)
 
         self.phase = 'CONNECT'
         self.stage = 'Connecting'
