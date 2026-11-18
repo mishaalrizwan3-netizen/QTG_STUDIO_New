@@ -77,15 +77,6 @@ TESTS = [
         "± 2.2 daN (5 lbs) or ± 10% force | ± 0.5 cm (0.2 in) or ± 10% pedal position | ± 2º rudder",
     ),
     TestSpec(
-        "2.a.(5)",
-        "Rudder pedal steering calibration",
-        "Static Control Checks",
-        63,
-        "To demonstrate that the rudder pedal steering conforms to the aeroplane.",
-        "",
-        "± 10% or ± 2° nosewheel angle or ± 10% rudder pedal position",
-    ),
-    TestSpec(
         "2.a.(7)",
         "Pitch trim rate and indicator calibration",
         "Static Control Checks",

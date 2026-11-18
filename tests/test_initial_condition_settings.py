@@ -19,7 +19,7 @@ class InitialConditionSettingsTests(unittest.TestCase):
 
     def test_catalog_entries_without_requirements_remain_unset(self):
         missing = [s for s in TESTS if s.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)', '2.c.(8b)', '2.a.(8)', '2.c.(1)', '2.b.(11)')]
-        self.assertEqual(len(missing), 21)
+        self.assertEqual(len(missing), 20)
         for spec in missing:
             with self.subTest(reference=spec.reference):
                 self.assertTrue(all(value == '' for value in catalog_defaults(spec).values()))
