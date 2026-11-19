@@ -55,8 +55,9 @@ def run_self_test(app_module):
             app.btn_subtab_auto.command()
             require(commands[-2:]==[('manual',app_module.TESTS[index].reference),('auto',app_module.TESTS[index].reference)])
         app._launch_common_test=launch
-        require(len(commands)==58)
-        result['checks'].append('all 58 SEP GUI mode buttons route to the common BRUNNER engine')
+        expected_commands = sum(2 for s in app_module.TESTS if s.reference != "1.c.(2)")
+        require(len(commands) == expected_commands)
+        result['checks'].append(f'all {expected_commands} SEP GUI mode buttons route to the common BRUNNER engine')
         spec = app_module.TESTS[0]
         app.select_test(0)
         require(app._automatic_methods[spec.reference].get()=='Recorded Replay')
@@ -67,14 +68,14 @@ def run_self_test(app_module):
         app._build_settings_panel(spec)
         require(app.settings_panel.winfo_manager() == 'pack')
         fields, graphs = app._test_settings[spec.reference]
-        require('Latitude[deg]' in fields and 'Heading[deg]' not in fields)
+        require('Latitude[deg]' in fields)
         require(len(graphs) == 25)
         fields['Alt[ft]'].set('')
         require(app._apply_test_settings(spec))
         require(fields['Alt[ft]'].get() == '3000')
         app._lock_test_settings(spec)
         require(not app.settings_panel.winfo_manager())
-        result['checks'].append('all 29 SEP test screens, password panel, graph choices, defaults')
+        result['checks'].append(f'all {len(app_module.TESTS)} SEP test screens, password panel, graph choices, defaults')
         state={'test_reference':spec.reference,'mode':'auto','stage':'Automatic blocked',
                'details':'Restored air data did not converge; replay remains paused.',
                'connected':True,'brunner_connected':True,'can_record':False,

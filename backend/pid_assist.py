@@ -7,6 +7,7 @@ the test's own automatic movement on its owned axis.
 from __future__ import annotations
 
 import math
+import time
 from typing import Dict, Any, Optional
 
 from backend.bank_pid import BankPID
@@ -40,6 +41,9 @@ class PidAssist:
         PIDs on owned axes will not fight the test's own commands.
         """
         self.context = dict(context or {})
+        # Test runners publish their context in each status snapshot. Keep only
+        # lightweight command feedback there; no test sequence is changed.
+        self._published_context = context if isinstance(context, dict) else None
         self.owned_axis_mask = int(owned_axis_mask)
         active_pids = self.context.get('active_pids') or {}
 
@@ -49,7 +53,8 @@ class PidAssist:
 
         # Only enable PID on an axis if the test itself does NOT own that axis
         self.pitch_enabled = self.pitch_requested and not bool(self.owned_axis_mask & 0x01)
-        self.bank_enabled = self.bank_requested and not bool(self.owned_axis_mask & 0x02)
+        # Yaw heading hold also needs roll when that axis is free.
+        self.bank_enabled = (self.bank_requested or self.yaw_requested) and not bool(self.owned_axis_mask & 0x02)
         self.yaw_enabled = self.yaw_requested and not bool(self.owned_axis_mask & 0x04)
 
         self.pid_axis_mask = 0
@@ -68,19 +73,19 @@ class PidAssist:
 
         pid_cond = self.context.get('pid_conditions') or {}
         init_cond = self.context.get('initial_conditions') or {}
-        raw_ias = pid_cond.get('target_ias') or init_cond.get('ias_kt') or 80.0
+        raw_ias = pid_cond.get('target_ias', init_cond.get('ias_kt', 80.0))
         try:
             self.target_ias = float(raw_ias)
         except (ValueError, TypeError):
             self.target_ias = 80.0
 
-        raw_hdg = pid_cond.get('target_heading') or self.context.get('target_heading_mag') or init_cond.get('heading_deg') or 0.0
+        raw_hdg = pid_cond.get('target_heading', self.context.get('target_heading_mag', init_cond.get('heading_deg', 0.0)))
         try:
             self.target_hdg = float(raw_hdg) % 360.0
         except (ValueError, TypeError):
             self.target_hdg = 0.0
 
-        raw_bank = pid_cond.get('target_bank') or self.context.get('target_bank') or init_cond.get('bank_deg') or 0.0
+        raw_bank = pid_cond.get('target_bank', self.context.get('target_bank', init_cond.get('bank_deg', 0.0)))
         try:
             self.target_bank = float(raw_bank)
         except (ValueError, TypeError):
@@ -171,4 +176,9 @@ class PidAssist:
                     pass
 
         self.latest_commands = commands
+        if self._published_context is not None:
+            self._published_context['pid_runtime'] = {
+                'command_axes': list(commands),
+                'updated_at': time.time(),
+            }
         return commands

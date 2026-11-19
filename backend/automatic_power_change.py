@@ -113,6 +113,14 @@ class AutomaticPowerDynamics:
         from backend.pid_assist import PidAssist
         self.pid_assist = PidAssist(self.context, owned_axis_mask=0)
         self.brunner = context.get('brunner')
+        if self.pid_assist.has_active_pids:
+            self.details = 'Connecting to P3D and selected BRUNNER PID axes'
+            if self.brunner is None:
+                from interfaces.brunner_base.src.brunner_interface import BrunnerInterface
+                self.brunner = BrunnerInterface(timeout=0.01)
+                self.brunner.connect()
+            if not getattr(self.brunner, 'sock', None):
+                raise RuntimeError('Selected PIDs require a Brunner connection')
 
     def status(self):
         frame = self.latest or {}
@@ -120,7 +128,7 @@ class AutomaticPowerDynamics:
         can_record = self.phase == 'READY'
         detail = self.details
         return dict(self.context, stage=self.stage, details=detail, updated=time.time(),
-                    connected=bool(self.sim.is_connected()), brunner_connected=False,
+                    connected=bool(self.sim.is_connected()), brunner_connected=bool(self.brunner and getattr(self.brunner, 'sock', None)),
                     can_record=can_record, controlling=self.phase in ('PREPARE', 'RECORD'),
                     recording=self.phase == 'RECORD', samples=len(self.rows),
                     elapsed=elapsed, duration_s=BASELINE_S + POST_POWER_S,
@@ -129,7 +137,8 @@ class AutomaticPowerDynamics:
                     throttle_text=(f"Throttle: {finite(frame, 'throttle') or 0:.1f}%" if frame else 'Throttle: N/A'),
                     flight_text=(f"Airspeed / Altitude: {frame.get('ias_kt', 0):.1f} kt / {frame.get('alt_ft', 0):.0f} ft" if frame else 'Airspeed / Altitude: N/A'),
                     attitude_text=(f"Pitch: {frame.get('pitch_deg', 0):+.1f}° | Bank: {frame.get('bank_deg', 0):+.1f}°" if frame else 'Pitch / Bank: N/A'),
-                    controls_text='No BRUNNER or P3D flight-control movement commanded',
+                    controls_text=('Selected PID axes controlled by BRUNNER' if self.pid_assist.has_active_pids
+                                   else 'No BRUNNER or P3D flight-control movement commanded'),
                     recording_text=('READY TO RECORD (00:00)' if can_record else
                                     f'RECORDING ({int(elapsed//60):02}:{int(elapsed%60):02}) - {self.stage}' if self.phase == 'RECORD' else self.stage),
                     progress_text=f'{len(self.rows)} recorded frames | {detail}',
@@ -152,6 +161,16 @@ class AutomaticPowerDynamics:
             if not self.latest or not self.sim.is_connected() or self.clock() - self.latest['receipt_time'] > 1.:
                 self.finish('FAILED', 'Fresh simulator measurements are required to start recording')
             else:
+                if self.pid_assist.has_active_pids:
+                    try:
+                        mask = self.pid_assist.pid_axis_mask
+                        self.brunner.configure_replay_mode(axis_mask=mask)
+                        self.brunner.write_setting(mask, 0x70, 'B', 1)
+                        self.brunner.set_overrides(mask, True)
+                    except Exception as exc:
+                        self.finish('FAILED', f'Selected PID engagement failed: {exc}')
+                        self.emit()
+                        return
                 self.sim.unpause_sim()
                 self.start_time = self.clock()
                 self.last_sim_advance = self.start_time
@@ -380,7 +399,8 @@ class AutomaticPowerDynamics:
                     elif now - self.power_command_time > POWER_CONFIRM_TIMEOUT_S:
                         raise RuntimeError('Actual P3D throttle did not reach go-around power')
                 elif now - self.power_completed_time >= POST_POWER_S:
-                    self.finish('COMPLETE', 'Uncontrolled power-change response captured; reference comparison not performed')
+                    response = ('PID-assisted' if self.pid_assist.has_active_pids else 'Uncontrolled')
+                    self.finish('COMPLETE', f'{response} power-change response captured; reference comparison not performed')
         except Exception as exc:
             self.finish('FAILED', str(exc))
         finally:
@@ -397,6 +417,17 @@ class AutomaticPowerDynamics:
                 self.sim.pause_sim()
         except Exception as exc:
             self.details += f'; pause failed: {exc}'
+        if self.pid_assist.has_active_pids and self.brunner and getattr(self.brunner, 'sock', None):
+            try:
+                mask = self.pid_assist.pid_axis_mask
+                self.brunner.write_setting(mask, 0x70, 'B', 0)
+                self.brunner.set_overrides(mask, False)
+                self.brunner.set_position_forwarding()
+            finally:
+                try:
+                    self.brunner.close()
+                except Exception:
+                    pass
         if self.rows:
             self.stage = 'Generating reports'
             self.emit()
@@ -439,7 +470,9 @@ def save_report(context, rows, result, reason, *, power_command_time, power_onse
                         baseline_required_s=BASELINE_S, post_power_required_s=POST_POWER_S,
                         aircraft_conformity='NOT EVALUATED - approved aircraft reference data not supplied',
                         test_code_note='2.b.(11) is an internal identifier; CS-FSTD(A) longitudinal c.(1) is the source requirement',
-                        measurement_source='Correlated P3D SimConnect telemetry; no BRUNNER or PID commands')
+                        measurement_source=('Correlated P3D SimConnect telemetry; selected BRUNNER PID control'
+                                            if any((context.get('active_pids') or {}).values())
+                                            else 'Correlated P3D SimConnect telemetry; no BRUNNER or PID commands'))
         meta_path.write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding='utf-8')
         outputs.append(str(meta_path))
         from reports.plot_graphs import _render_report
@@ -483,6 +516,9 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
             extra = (('autopilot_active', 'AUTOPILOT MASTER', 'bool'),
                      ('elevator_input', 'ELEVATOR POSITION', 'position'),
                      ('elevator_trim_rad', 'ELEVATOR TRIM POSITION', 'radians'))
+            if (context.get('active_pids') or {}).get('yaw'):
+                extra += (('sideslip_deg', 'INCIDENCE BETA', 'degrees'),
+                          ('yaw_rate_deg_s', 'ROTATION VELOCITY BODY Y', 'degrees per second'))
             reader_factory = lambda: Measurements(dll, channels=CHANNELS + extra)
         reader = reader_factory()
         directory = Path(context['command_directory'])

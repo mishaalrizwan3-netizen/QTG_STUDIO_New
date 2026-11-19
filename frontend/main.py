@@ -369,6 +369,66 @@ COL = {
 FONT = "Segoe UI" if sys.platform.startswith("win") else "DejaVu Sans"
 
 
+def format_active_pid_status(state):
+    """Summarize selected Automatic PID axes using the published live state."""
+    selected = state.get('active_pids') or {}
+    if state.get('mode') != 'auto' or not any(selected.values()):
+        return 'PID assistance: Off'
+
+    telemetry = state.get('telemetry') or {}
+    targets = state.get('pid_conditions') or {}
+    initial = state.get('initial_conditions') or {}
+    runtime = state.get('pid_runtime')
+    command_axes = set(runtime.get('command_axes') or ()) if isinstance(runtime, dict) else None
+    owned = {'2.a.(1)': {'airspeed'}, '2.a.(2)': {'bank'},
+             '2.a.(3)': {'yaw'}, '2.c.(8b)': {'airspeed'}}.get(
+                 state.get('test_reference'), set())
+    running = bool(state.get('recording') or
+                   (state.get('control_method') in ('pid', 'multi_pid')
+                    and state.get('controlling')))
+
+    def number(value):
+        try:
+            result = float(value)
+            return result if math.isfinite(result) else None
+        except (TypeError, ValueError):
+            return None
+
+    axes = (
+        ('airspeed', 'Airspeed PID', 'pitch', 'ias_kt', 'target_ias', 'ias_kt', 'kt', 3.0),
+        ('bank', 'Bank PID', 'roll', 'bank_deg', 'target_bank', 'bank_deg', '°', 1.0),
+        ('yaw', 'Yaw PID', 'rudder', 'heading_deg', 'target_heading', 'heading_deg', '°', 2.0),
+    )
+    messages = []
+    for key, name, command, measurement, target_key, initial_key, unit, tolerance in axes:
+        if not selected.get(key):
+            continue
+        if key in owned:
+            messages.append(f'{name}: test controls this axis')
+            continue
+        if key == 'yaw' and state.get('test_reference') == '2.a.(2)':
+            messages.append('Yaw PID: rudder damping; test controls roll')
+            continue
+        if not running:
+            messages.append(f'{name}: waiting for recording')
+            continue
+        if not state.get('brunner_connected'):
+            messages.append(f'{name}: waiting for CLS2sim')
+            continue
+        if command_axes is not None and command not in command_axes:
+            messages.append(f'{name}: waiting for controller command')
+            continue
+        actual = number(telemetry.get(measurement))
+        target = number(targets.get(target_key, initial.get(initial_key)))
+        if actual is None or target is None:
+            messages.append(f'{name}: waiting for measurements')
+            continue
+        error = abs(((actual - target + 180) % 360) - 180) if key == 'yaw' else abs(actual - target)
+        action = 'holding' if error <= tolerance else 'correcting'
+        messages.append(f'{name}: RUNNING, {action} target {target:.1f}{unit}; measured {actual:.1f}{unit}')
+    return ' | '.join(messages)
+
+
 def open_pdf_file(pdf_path: Path | str):
     p = Path(pdf_path)
     if not p.is_file():
@@ -1972,7 +2032,10 @@ class App(tk.Tk):
         box.bind("<Configure>",resize_text)
         self.common_status=self._label(box,"Choose Manual or Automatic to initialize the Sim Flight Model and CLS2sim connection.",
                                       10,COL["blue"],"bold",anchor="w",wraplength=950,justify="left")
-        self.common_status.pack(fill="x",pady=(0,12))
+        self.common_status.pack(fill="x",pady=(0,4))
+        self.common_pid_status=self._label(box,"PID assistance: Off",9,COL["dim"],
+                                           "bold",anchor="w",wraplength=950,justify="left")
+        self.common_pid_status.pack(fill="x",pady=(0,12))
         if spec.reference == '1.c.(2)':
             self.common_status.configure(text='Settings review only: this multi-engine test is not executable in the current single-engine application.',fg=COL['amber'])
         grid=tk.Frame(box,bg="#FFFFFF")
@@ -2182,6 +2245,10 @@ class App(tk.Tk):
         if state.get("evaluation_result"): text+="\nValidation: "+state["evaluation_result"]
         text=text.replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim")
         self.common_status.configure(text=text,fg=COL["red"] if stage in ("Automatic blocked","Connection error", "FAILED") else COL["blue"])
+        pid_status = format_active_pid_status(state)
+        self.common_pid_status.configure(text=pid_status,
+            fg=COL['green'] if 'RUNNING' in pid_status else
+               COL['dim'] if pid_status == 'PID assistance: Off' else COL['amber'])
         mapping={"throttle":"throttle_text","engine":"engine_text","flight":"flight_text","attitude":"attitude_text",
                  "controls":"controls_text","recording":"recording_text","progress":"progress_text"}
         connection_text = f"Sim Flight Model {'Connected' if state.get('connected') else 'Disconnected'}"
@@ -2519,6 +2586,10 @@ class App(tk.Tk):
             monitor.window.deiconify();monitor.window.lift()
         else:
             self._pid_monitor=PidMonitor(self,lambda:self._common_command("stop"),send=lambda action,**values:self._common_command(action,**values))
+            monitor=self._pid_monitor
+        state=getattr(self, '_common_last_state', None)
+        if state:
+            monitor.update(state)
 
     def _manual_condition_fingerprint(self, reference):
         from backend.initialization_plan_safety import identity
@@ -3592,6 +3663,9 @@ class App(tk.Tk):
             self._label(t_row, target_label, 8, COL['dim']).pack(side='left')
             ttk.Entry(t_row, textvariable=target_var, width=8,
                       state="normal" if unlocked else "disabled").pack(side='right')
+
+        ttk.Button(box, text='Open full PID GUI',
+                   command=self._open_pid_monitor).pack(fill='x', pady=(6, 8))
 
         if spec.reference=="1.c.(1)":
             if not hasattr(self,"_pid_validation"): self._pid_validation={}

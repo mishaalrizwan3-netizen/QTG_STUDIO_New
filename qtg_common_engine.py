@@ -1057,7 +1057,22 @@ def worker_class(base,context,publish):
             if self._control_method=='pid':
                 from qtg_climb_pid import loop
                 return loop(self,base)
-            return super()._auto_replay_loop()
+            active_pids = context.get('active_pids') or {}
+            if self._control_method == 'replay' and any(active_pids.values()):
+                from backend.pid_assist import PidAssist
+                assist = PidAssist(context)
+                if assist.has_active_pids:
+                    def pid_command(pitch, roll, rudder):
+                        telemetry = self.p3d.get_telemetry() if self.p3d else {}
+                        commands = assist.update(time.perf_counter(), telemetry)
+                        return (commands.get('pitch', pitch),
+                                commands.get('roll', roll),
+                                commands.get('rudder', rudder))
+                    self._replay_pid_command = pid_command
+            try:
+                return super()._auto_replay_loop()
+            finally:
+                self._replay_pid_command = None
 
         def _on_ui_timer_tick(self):
             # Keep the existing status refresh, but do not hide PID feedback failures.

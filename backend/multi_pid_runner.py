@@ -384,6 +384,12 @@ def loop(window, base, owner_alive=None):
                 roll_pos=roll_cmd if roll_needed else None,
                 rudder_pos=rudder_cmd if (yaw_enabled and transport.rudder_available) else None
             )
+            context['pid_runtime'] = {
+                'command_axes': (['pitch'] if pitch_enabled else []) +
+                                (['roll'] if roll_needed else []) +
+                                (['rudder'] if yaw_enabled and transport.rudder_available else []),
+                'updated_at': time.time(),
+            }
 
             # Feedback tracking validation
             measured_pitch = transport.last_pitch_feedback or 0.0

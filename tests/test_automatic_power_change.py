@@ -1,6 +1,6 @@
 """Pure offline state-machine tests: no P3D/BRUNNER/USB hardware."""
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import json
 import tempfile
 import unittest
@@ -88,6 +88,22 @@ class Workflow(unittest.TestCase):
                 self.feed(0.5, ias_kt=90.+i*.8)
         self.assertEqual(self.worker.result,'FAILED')
         self.assertEqual([e for e in self.sim.events if e[0]=='step'],[])
+    def test_selected_pid_uses_brunner_during_existing_power_step(self):
+        brunner = Mock()
+        brunner.sock = True
+        self.ctx['active_pids'] = {'airspeed': False, 'bank': True, 'yaw': False}
+        self.ctx['brunner'] = brunner
+        self.worker = AutomaticPowerDynamics(self.ctx,self.sim,self.published.append,clock=self.clock)
+        self.prepare()
+        self.worker.command(dict(action='record'))
+        self.assertEqual(self.worker.phase, 'RECORD')
+        self.feed(bank_deg=3.)
+        self.assertTrue(any(call.args[0] == 0x02 and call.args[1] == 0x80
+                            for call in brunner.write_setting.call_args_list))
+        with patch('backend.automatic_power_change.save_report',return_value=[]):
+            self.worker.command(dict(action='stop'))
+        brunner.set_overrides.assert_any_call(0x02, False)
+        brunner.close.assert_called_once()
     def test_autopilot_blocks_free_response(self):
         self.feed(); self.feed(autopilot_active=1.)
         self.assertEqual(self.worker.result,'FAILED')

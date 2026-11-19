@@ -414,9 +414,13 @@ class ClimbPidTests(unittest.TestCase):
         spec=SimpleNamespace(reference='1.c.(1)',title='Normal climb',pdf_graphs=[])
         values={'Flt cond':'Climb','Alt[ft]':'3000','IAS[kts]':'80','Latitude[deg]':'32.235','Longitude[deg]':'74.135','Heading[deg]':'0','Pitch[deg]':'0','Bank[deg]':'0','Flaps':'0','Throttle[%]':'100','Temperature[C]':'15'}
         fields={key:Mock(get=lambda value=value:value) for key,value in values.items()}
-        host=SimpleNamespace(_common_duration_var=Mock(get=lambda:'10'),_automatic_methods={spec.reference:Mock(get=lambda:'PID Automatic')},
+        host=SimpleNamespace(_common_duration_var=Mock(get=lambda:'10'),_automatic_methods={spec.reference:Mock(get=lambda:'Recorded Replay')},
             _test_settings={spec.reference:(fields,{})},_apply_test_settings=lambda spec:True,
             _pid_validation={spec.reference:Mock(get=lambda:'')},_common_process=None,
+            _pid_axis_checks={spec.reference:{'airspeed':Mock(get=lambda:True), 'bank':Mock(get=lambda:False), 'yaw':Mock(get=lambda:False)}},
+            _pid_targets={spec.reference:Mock(get=lambda:'80')},
+            _pid_targets_bank={spec.reference:Mock(get=lambda:'0')},
+            _pid_targets_heading={spec.reference:Mock(get=lambda:'0')},
             common_record_button=Mock(),common_status=Mock(),after=Mock(),_poll_common_test=Mock(),_open_pid_monitor=Mock())
         with patch.object(engine,'launch',return_value=(Mock(),{})) as launch:
             main.App._launch_common_test(host,'auto',spec)
@@ -426,7 +430,20 @@ class ClimbPidTests(unittest.TestCase):
         self.assertEqual(launch.call_args.kwargs['control_method'],'pid')
         self.assertEqual(launch.call_args.kwargs['pid_conditions']['target_ias'],80.)
         host._open_pid_monitor.assert_not_called()
-        # The separate Replay button bypasses the PID selection without changing it.
+        host._pid_axis_checks[spec.reference]['airspeed'] = Mock(get=lambda:False)
+        host._pid_axis_checks[spec.reference]['bank'] = Mock(get=lambda:True)
+        host._pid_axis_checks[spec.reference]['yaw'] = Mock(get=lambda:True)
+        host._common_process = None
+        with patch.object(engine,'launch',return_value=(Mock(),{})) as combined:
+            main.App._launch_common_test(host,'auto',spec)
+        combined.assert_called_once()
+        self.assertEqual(combined.call_args.kwargs['control_method'],'multi_pid')
+        self.assertEqual(combined.call_args.kwargs['active_pids'],
+                         {'airspeed':False,'bank':True,'yaw':True})
+        # With no PID checkbox selected, the replay path uses its Manual reference.
+        host._pid_axis_checks[spec.reference]['airspeed'] = Mock(get=lambda:False)
+        host._pid_axis_checks[spec.reference]['bank'] = Mock(get=lambda:False)
+        host._pid_axis_checks[spec.reference]['yaw'] = Mock(get=lambda:False)
         host._common_reference_var=Mock(get=lambda:'manual.csv')
         host._common_process=None
         with patch.object(engine,'validate_reference',return_value='manual.csv'),patch.object(engine,'launch',return_value=(Mock(),{})) as replay:
@@ -435,7 +452,7 @@ class ClimbPidTests(unittest.TestCase):
         self.assertEqual(replay.call_args.kwargs['control_method'],'replay')
         self.assertIsNone(replay.call_args.kwargs['pid_conditions'])
         self.assertEqual(replay.call_args.args[3],'manual.csv')
-        self.assertEqual(host._automatic_methods[spec.reference].get(),'PID Automatic')
+        self.assertEqual(host._automatic_methods[spec.reference].get(),'Recorded Replay')
         host._open_pid_monitor.assert_not_called()
 
     def test_climb_airspeed_graph_shows_target_and_three_knot_tolerance(self):

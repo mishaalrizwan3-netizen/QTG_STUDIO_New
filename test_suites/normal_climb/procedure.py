@@ -490,6 +490,9 @@ def loop(window,base):
             with device._io_lock:
                 if window.stop_worker_event.is_set(): break
                 move_controls(window,current)
+            getattr(window, '_session_context', {})['pid_runtime'] = {
+                'command_axes': ['pitch'], 'updated_at': time.time(),
+            }
             if abs(current-axes[0][0])>.25:
                 mismatch=now if mismatch is None else mismatch
                 if now-mismatch>2.5: raise RuntimeError('CLS2sim pitch position did not track PID command.')

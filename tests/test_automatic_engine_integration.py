@@ -629,6 +629,29 @@ class TelemetryAndReportingTests(unittest.TestCase):
         self.assertEqual(st['telemetry']['total_weight'], 1200.0)
         self.assertEqual(st['telemetry']['cg_percent'], 26.5)
 
+    def test_selected_bank_pid_is_visible_during_acceleration(self):
+        from frontend.main import format_active_pid_status
+
+        mock_brunner = Mock()
+        mock_brunner.sock = True
+        mock_brunner._connected = True
+        mock_brunner.read_axis.side_effect = lambda axis: (0.0, 0.0, 0.0)
+        context = dict(mode='auto', control_method=METHOD, test_reference='1.f.(1)',
+                       title='Engine acceleration', initial_conditions=conditions(False),
+                       pid_conditions={'target_bank':0.0},
+                       active_pids={'airspeed':False,'bank':True,'yaw':False},
+                       result_directory=str(self.root/'results'))
+        worker = AutomaticEngine(context, self.sim, self.published.append,
+                                 clock=lambda: self.now, brunner=mock_brunner)
+        worker.phase = 'RECORD'
+        worker.latest = dict(ias_kt=80.0, alt_ft=2000.0, pitch_deg=2.0,
+                             bank_deg=0.6, heading_deg=48.4)
+        worker.pid_assist.update(self.now, worker.latest, mock_brunner)
+        state = worker.status()
+        self.assertEqual(state['pid_runtime']['command_axes'], ['roll'])
+        self.assertIn('Bank PID: RUNNING, holding', format_active_pid_status(state))
+        self.assertIn('measured 0.6°', format_active_pid_status(state))
+
     def test_unavailable_telemetry_displays_na_instead_of_dashes(self):
         context = dict(mode='auto', control_method=METHOD, test_reference='1.f.(1)',
                        title='Engine acceleration', initial_conditions=conditions(False),

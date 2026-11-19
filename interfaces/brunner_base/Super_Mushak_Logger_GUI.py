@@ -1803,6 +1803,9 @@ class SuperMushakLoggerApp(QMainWindow):
                     if self.p3d is None or not self.p3d.set_replay_throttle(throttle_command):
                         raise RuntimeError("Prepar3D rejected throttle replay; test paused.")
                 p_cmd, r_cmd, y_cmd = tracker.command(now, references, feedforward, feedback)
+                pid_command = getattr(self, '_replay_pid_command', None)
+                if pid_command is not None:
+                    p_cmd, r_cmd, y_cmd = pid_command(p_cmd, r_cmd, y_cmd)
             except (ValueError,RuntimeError) as exc:
                 if self.p3d:
                     self.p3d.pause_sim()
