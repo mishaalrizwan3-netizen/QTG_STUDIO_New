@@ -4,7 +4,7 @@ import struct
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 ENGINE = (ROOT / 'SMK_Engine_From_Climb.py').read_text(encoding='utf-8')
 CLIMB = (ROOT / 'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text(encoding='utf-8')
 TRANSPORT = (ROOT / 'climb_brunner_transport.py').read_text(encoding='utf-8')

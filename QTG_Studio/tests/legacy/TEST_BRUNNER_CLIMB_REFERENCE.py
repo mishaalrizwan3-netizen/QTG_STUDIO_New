@@ -20,7 +20,7 @@ class FakeClock:
         self.now += max(0.0, float(seconds))
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 SRC = (ROOT / 'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text(encoding='utf-8')
 PLOT = (ROOT / 'plot_graphs.py').read_text(encoding='utf-8')
 

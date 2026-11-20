@@ -25,8 +25,8 @@ def main():
     staging.mkdir(parents=True, exist_ok=resume)
     distribution = staging / 'distribution'
     release = distribution / 'QTG_Studio_Demo'
-    spec = (ROOT / 'QTG_Studio_FNPTII.spec').read_text()
-    spec = spec.replace('root = Path(SPECPATH)', 'root = Path(' + repr(str(ROOT)) + ')')
+    spec = (ROOT / 'tools/packaging/QTG_Studio_FNPTII.spec').read_text()
+    spec = spec.replace('root = Path(SPECPATH).parents[1]', 'root = Path(' + repr(str(ROOT)) + ')')
     spec = spec.replace("str(root/'main.py')", "str(root/'tools'/'demo_entry.py')")
     spec = spec.replace("name='QTG_Studio_FNPTII'", "name='QTG_Studio_Demo'", 1)
     # The executable has the requested short name; the collection has the folder name.

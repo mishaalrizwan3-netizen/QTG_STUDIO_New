@@ -26,7 +26,7 @@ From the application directory, run `python main.py`. Normal startup may connect
 
 Focused offline tests can be run with `python -B -m unittest tests.test_initialization_compatibility tests.test_initial_condition_settings`. Some other tests require local data or platform-specific dependencies; review test setup before running them. Do not use offline tests as evidence of simulator or hardware validation.
 
-To build a one-folder Windows deployment after installing PyInstaller and obtaining the authorized native resources, run `python -m PyInstaller --noconfirm QTG_Studio_SimPC.spec`. Copy the entire resulting folder, including `_internal`; the EXE alone is insufficient. Results can be configured with `QTG_RESULTS_ROOT` or a `qtg_settings.json` file beside the EXE.
+To build a one-folder Windows deployment after installing PyInstaller and obtaining the authorized native resources, run `python -m PyInstaller --noconfirm tools/packaging/QTG_Studio_SimPC.spec`. Copy the entire resulting folder, including `_internal`; the EXE alone is insufficient. Results can be configured with `QTG_RESULTS_ROOT` or a `qtg_settings.json` file beside the EXE.
 
 ## Team workflow
 

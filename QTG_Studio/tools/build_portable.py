@@ -18,7 +18,7 @@ def main():
         if not (ROOT/relative).is_file(): raise FileNotFoundError(relative)
     subprocess.run([sys.executable,'-m','PyInstaller','--noconfirm',
                     '--distpath',str(STAGING),'--workpath',str(ROOT/'build/portable_work'),
-                    str(ROOT/'QTG_Studio_FNPTII.spec')],cwd=ROOT,check=True)
+                    str(ROOT/'tools/packaging/QTG_Studio_FNPTII.spec')],cwd=ROOT,check=True)
     (RELEASE/'START_QTG.bat').write_bytes(b'@echo off\r\ncd /d "%~dp0"\r\nstart "" "%~dp0QTG_Studio_FNPTII.exe"\r\n')
     (RELEASE/'README.txt').write_text('QTG Studio - standalone Windows x64 release\n\n'
         'Run START_QTG.bat or QTG_Studio_FNPTII.exe.\n'

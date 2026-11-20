@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 import unittest
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 SRC = (ROOT/'climb_brunner_v15125.py').read_text('utf-8')
 ENG = (ROOT/'SMK_Engine_From_Climb.py').read_text('utf-8')
 

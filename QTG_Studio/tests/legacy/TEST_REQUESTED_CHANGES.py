@@ -1,7 +1,7 @@
 """Offline source / PDF regression tests; no P3D or BRUNNER access."""
 import ast, os, sys, tempfile, shutil
 from pathlib import Path
-BASE=Path(__file__).resolve().parent
+BASE=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(BASE))
 import plot_graphs
 from SMK_Engine_TiTt_V2_1_3_Addon import measure

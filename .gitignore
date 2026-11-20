@@ -28,6 +28,8 @@ sessions/
 *.exe
 *.dll
 *.lib
+!QTG_Studio/bridge/lib/qtg_p3d_bridge.lib
+!QTG_Studio/bridge/lib/qtg_simconnect.lib
 *.pdb
 *.pdf
 *.key
@@ -40,6 +42,6 @@ test_notes.json
 p3d_sdk/
 easa_references/
 SMK_Engine_V213_OriginalAirManager/
-docs/*approval*
-docs/*APPROVAL*
-docs/*plan*.json
+QTG_Studio/docs/*approval*
+QTG_Studio/docs/*APPROVAL*
+QTG_Studio/docs/*plan*.json

@@ -15,7 +15,7 @@ class DecelerationReportTests(unittest.TestCase):
                 'eng_rpms':[2700], 'prop_rpms':[2660]},'observation_elapsed_s':0})
         self.assertEqual(f['ground_speed_kt'],0.0)
         self.assertEqual(f['ias_kt'],82)
-        src=(Path(__file__).parent/'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text(encoding='utf-8')
+        src=(Path(__file__).resolve().parents[2]/'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text(encoding='utf-8')
         self.assertNotIn('gs_val = ias if',src)
         self.assertIn('"Ground Speed (kt)": round(gs_val, 2) if gs_val is not None else ""', src)
 

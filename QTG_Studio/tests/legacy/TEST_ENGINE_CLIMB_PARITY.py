@@ -6,7 +6,7 @@ import ast
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 engine_src = (ROOT / 'SMK_Engine_From_Climb.py').read_text(encoding='utf-8')
 climb_src = (ROOT / 'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text(encoding='utf-8')
 engine_tree = ast.parse(engine_src)

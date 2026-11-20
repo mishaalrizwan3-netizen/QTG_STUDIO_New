@@ -129,7 +129,7 @@ The current shared-engine results root is `D:\QTG_Test_Results\`. Runs are group
 
 - **Current source:** `python QTG_STUDIO/main.py` from the workspace root.
 - **Launch scripts:** `QTG_STUDIO/RUN_QTG.bat` and `run.bat`; check whether a script prefers an existing, potentially older EXE.
-- **Portable build:** `QTG_STUDIO/MAKE_EXE.bat`, `tools/build_portable.py` and `QTG_Studio_FNPTII.spec`. The release is a folder containing the EXE plus `_internal` and bundled assets/DLLs.
+- **Portable build:** `QTG_STUDIO/MAKE_EXE.bat`, `tools/build_portable.py` and `tools/packaging/QTG_Studio_FNPTII.spec`. The release is a folder containing the EXE plus `_internal` and bundled assets/DLLs.
 - **Checks:** application tests under `QTG_STUDIO/tests/`, engine adapter tests under `test_suites/_shared/`, deceleration replay tests under `test_suites/engine_deceleration/`, and BRUNNER tests under `interfaces/brunner_base/tests/`. Offline tests cannot establish live P3D/CLS2Sim behavior.
 
 This document describes source structure; it does not claim the packaged `dist/` executable contains every recent source edit. The EXE must be rebuilt explicitly when a new release is requested.

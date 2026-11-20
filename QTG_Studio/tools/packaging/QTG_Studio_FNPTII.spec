@@ -1,7 +1,7 @@
 # Build a single shared runtime for the Tk workspace and Qt engine suite.
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_dynamic_libs
-root = Path(SPECPATH)
+root = Path(SPECPATH).parents[1]
 brunner = root/'interfaces'/'brunner_base'
 datas = [(str(root/'test_suites'/'normal_climb'/'pid_source'/'SMK_IAS_PID_BRUNNER_ONLY_V4_1.py'), 'pid_source'),
          (str(brunner/'Super_Mushak_Logger_GUI.py'), 'brunner_base'),

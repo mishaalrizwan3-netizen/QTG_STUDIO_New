@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 SRC = (ROOT / 'SMK_Engine_From_Climb.py').read_text('utf8')
 LOGGER = (ROOT / 'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py').read_text('utf8')
 TREE = ast.parse(SRC)

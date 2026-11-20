@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from engine_airmanager_passive_yaw import EngineAirManagerPassiveYaw
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 APP = (ROOT/'SMK_Engine_From_Climb.py').read_text('utf-8')
 
 class FakeClimb:

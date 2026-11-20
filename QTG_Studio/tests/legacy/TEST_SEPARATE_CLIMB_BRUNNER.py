@@ -10,7 +10,7 @@ import ast
 import hashlib
 import unittest
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 TRANSPORT = ROOT / 'climb_brunner_transport.py'
 LOGGER = ROOT / 'Super_Mushak_Logger_V15_FULL_CAUSAL_STATE.py'
 ADAPTER = ROOT / 'climb_brunner.py'
