@@ -8,12 +8,14 @@ from datetime import datetime
 import importlib.util
 import json
 import math
+from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS, body_acceleration_fields
 from pathlib import Path
 import sys
 import threading
 import time
 
 from backend.verifier import validate_conditions
+from backend.initializer import apply_body_acceleration
 
 REFERENCE = '2.c.(1)'  # CS-FSTD(A) Longitudinal Handling c.(1)
 LEGACY_REFERENCE = '2.b.(11)'
@@ -241,6 +243,7 @@ class AutomaticPowerDynamics:
             'Elevator Trim Angle (rad)': finite(frame, 'elevator_trim_rad'),
             'Autopilot Master (0/1)': finite(frame, 'autopilot_active'),
             'Power Step Command (0/1)': int(self.power_command_time is not None),
+            **body_acceleration_fields(frame),
         }
         self.rows.append(row)
 
@@ -333,6 +336,7 @@ class AutomaticPowerDynamics:
                 self.sim.pause_sim()
                 if not self.sim.wait_for_paused(3.0):
                     raise RuntimeError('Simulator did not confirm pause after initialization')
+                apply_body_acceleration(self.sim, self.context)
                 self.phase, self.stage = 'READY', 'READY TO RECORD'
                 self.details = 'Initial conditions verified. Ready to record 5 s baseline and power step.'
                 return
@@ -519,7 +523,7 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
             if (context.get('active_pids') or {}).get('yaw'):
                 extra += (('sideslip_deg', 'INCIDENCE BETA', 'degrees'),
                           ('yaw_rate_deg_s', 'ROTATION VELOCITY BODY Y', 'degrees per second'))
-            reader_factory = lambda: Measurements(dll, channels=CHANNELS + extra)
+            reader_factory = lambda: Measurements(dll, channels=CHANNELS + extra + BODY_ACCELERATION_CHANNELS)
         reader = reader_factory()
         directory = Path(context['command_directory'])
         while not controller.closed:

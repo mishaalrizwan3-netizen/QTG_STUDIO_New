@@ -9,6 +9,8 @@ import time
 
 from backend.engine_step_sequence import EngineStepSequence, Settings
 from backend.engine_conditions import enforce
+from backend.initializer import apply_body_acceleration
+from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS, body_acceleration_fields
 
 REFERENCES = ('1.f.(1)', '1.f.(2)')
 METHOD = 'engine_step'
@@ -399,6 +401,7 @@ class AutomaticEngine:
                 self.sim.pause_sim()
                 if not self.sim.wait_for_paused(3.0):
                     raise RuntimeError('Simulator did not confirm pause after initialization')
+                apply_body_acceleration(self.sim, self.context)
                 self.phase, self.stage = 'READY', 'READY TO RECORD'
                 self.details = 'Click Start Recording: 5 seconds baseline, throttle step, then 3 seconds stable RPM'
                 return
@@ -485,6 +488,16 @@ class AutomaticEngine:
                     row['Engine Manifold Pressure (psi)'] = float('nan')
                     row['Manifold Pressure (inHg)'] = float('nan')
                     self.diagnostics.setdefault('manifold_pressure', 'RECIP ENG MANIFOLD PRESSURE:1 channel unavailable from simulator')
+
+                if not self.deceleration:
+                    fuel_flow = frame.get('fuel_flow_pph')
+                    row['Fuel Flow (pph)'] = (
+                        float(fuel_flow)
+                        if fuel_flow is not None and math.isfinite(fuel_flow) and fuel_flow >= 0
+                        else float('nan')
+                    )
+
+                row.update(body_acceleration_fields(frame))
 
                 if vs is not None and math.isfinite(vs):
                     row['Rate of Climb/Descent (fpm)'] = float(vs)
@@ -574,7 +587,7 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
                                   kwargs=dict(place_at_rahwali=False, place_airborne=False), daemon=True)
         thread.start()
         if reader_factory is None:
-            from interfaces.engine_measurements import Measurements
+            from interfaces.engine_measurements import CHANNELS, Measurements
             root = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[1]
             dll_candidates = [
                 root / 'bridge/bin/qtg_simconnect.dll',
@@ -584,7 +597,12 @@ def run(context, publish, *, factory=None, reader_factory=None, sleep=time.sleep
                 Path(__file__).resolve().parents[1] / 'bridge/bin/qtg_simconnect.dll',
             ]
             dll = next((p for p in dll_candidates if p.is_file()), dll_candidates[0])
-            reader_factory = lambda: Measurements(dll)
+            channels = CHANNELS + BODY_ACCELERATION_CHANNELS
+            if not controller.deceleration:
+                channels += (
+                    ('fuel_flow_pph', 'RECIP ENG FUEL FLOW:1', 'pounds per hour'),
+                )
+            reader_factory = lambda: Measurements(dll, channels=channels)
         reader = reader_factory()
         from backend.parking_brake import GroundParkingBrake
         controller.ground_brake = GroundParkingBrake(reader.engage_parking_brake, require_stationary=False)

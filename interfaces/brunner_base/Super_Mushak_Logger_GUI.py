@@ -37,6 +37,8 @@ from PySide6.QtWidgets import (
 RESOURCE_DIR = str(Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)))
 CURRENT_DIR = str(Path(sys.executable).resolve().parent if getattr(sys,"frozen",False) else Path(__file__).resolve().parent)
 SRC_DIR = os.path.join(RESOURCE_DIR, "src")
+if RESOURCE_DIR not in sys.path:
+    sys.path.insert(0, RESOURCE_DIR)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 if SRC_DIR not in sys.path:
@@ -1962,6 +1964,7 @@ class SuperMushakLoggerApp(QMainWindow):
         print(f"\n[SAVE] Saving CSV to: {csv_path}")
         try:
             # Standard QTG Fieldnames expected by plot_graphs.py
+            from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS, body_acceleration_fields
             fieldnames = [
                 "Time (s)",
                 "Altitude MSL (ft)",
@@ -2065,6 +2068,7 @@ class SuperMushakLoggerApp(QMainWindow):
                     'BUC Propeller Slider (%)', 'BUC Mixture Dial (%)', 'BUC Throttle Raw',
                     'BUC Propeller Raw', 'BUC Mixture Raw', 'BUC Sample Age (s)'])
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                fieldnames.extend(simvar for _, simvar, _ in BODY_ACCELERATION_CHANNELS)
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
 
@@ -2248,6 +2252,7 @@ class SuperMushakLoggerApp(QMainWindow):
                                 ('Yaw Rate (deg/s)', 'yaw_rate'), ('Engine 1 RPM', 'engine_rpm'),
                                 ('Ground Speed (kt)', 'ground_speed')):
                             row_dict[key] = tel.get(source, float('nan'))
+                    row_dict.update(body_acceleration_fields(tel))
                     writer.writerow(row_dict)
 
             print(f"[OK] CSV saved successfully with full QTG columns: {len(self.rec_time)} rows.")

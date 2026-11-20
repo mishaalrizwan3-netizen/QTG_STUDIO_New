@@ -19,6 +19,9 @@ datas += [(str(root/'test_suites'/relative), 'test_suites/'+str(Path(relative).p
 datas += [(str(root/'test_suites'/name/'definition.json'), 'test_suites/'+name) for name in ['normal_climb','engine_acceleration','engine_deceleration']]
 datas += [(str(root/'test_suites'/'engine_deceleration'/name), 'test_suites/engine_deceleration') for name in ['initialization.json','input.json','output.json']]
 datas += [(str(root/'test_suites'), 'test_suites')]
+datas += [(str(root/'backend'), 'backend')]
+datas += [(str(root/'interfaces'), 'interfaces')]
+datas += [(str(root/'reports'), 'reports')]
 
 binaries = [(str(brunner/'native/bin/p3d_bridge_engine_init_v1517.dll'), dest) for dest in ['brunner_base/native/bin', 'interfaces/brunner_base/native/bin', 'native/bin']] + [
             (str(root/'bridge/bin/qtg_p3d_bridge.dll'), 'bridge/bin'),

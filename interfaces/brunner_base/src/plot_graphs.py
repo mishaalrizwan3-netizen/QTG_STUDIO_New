@@ -742,6 +742,7 @@ def _set_recorded_time(ax, duration):
 
 def _selected_report(csv_path, out_path, selected, manual_path=None):
     """Render the existing report groups using only the operator's selections."""
+    from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS
     measured = _read_csv(csv_path)
     reference = _read_csv(manual_path) if manual_path else None
     tm = _series(measured, 'Time (s)')
@@ -754,6 +755,8 @@ def _selected_report(csv_path, out_path, selected, manual_path=None):
         ('Pitch trim', [('trim_position_rad', 'Elevator Trim Angle (rad)'), ('trim_indicator', 'Elevator Trim Indicator (position)'), ('trim_value_pct', 'Elevator Trim (%)'), ('trim_elevator_surface_rad', 'Elevator Surface (rad)')]),
         ('Stall warning', [('stall_aoa', 'Aircraft Angle of Attack (deg)'), ('stall_warning', 'Stall Warning (0/1)'), ('stall_elevator', 'Elevator Surface (rad)'), ('stall_pitch_position', 'BRUNNER Pitch Position (raw)')]),
         ('Cockpit levers', [('buc_throttle', 'BUC Throttle Z Rotation (%)'), ('buc_propeller', 'BUC Propeller Slider (%)'), ('buc_mixture', 'BUC Mixture Dial (%)'), ('buc_torque', 'Engine Torque (ft lb)'), ('buc_sim_propeller', 'Propeller 1 Lever (%)'), ('buc_sim_mixture', 'Mixture 1 Position (%)')])]
+    body_groups = [(key, simvar) for key, simvar, _ in BODY_ACCELERATION_CHANNELS]
+    groups.append(('Body-axis Acceleration (ft/s²)', body_groups))
     chosen = set(selected)
     stall = reference is None and 'Stall Warning (0/1)' in measured.columns
     if stall:
@@ -938,6 +941,7 @@ def _format_climb_airspeed_axis(ax):
 
 def _pid_report(csv_path, out_path, validation_df=None, evaluation_result="NOT EVALUATED", target_ias=80, selected_graphs=None, mode="pid"):
     """Same six-page portrait graph groups as the supplied Manual report."""
+    from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS
     df=_read_csv(csv_path);t=_series(df,"Time (s)")
     if "Manifold Pressure (inHg)" not in df and "Engine Manifold Pressure (psi)" in df:
         df["Manifold Pressure (inHg)"]=pd.to_numeric(df["Engine Manifold Pressure (psi)"],errors="coerce")*2.0360206576
@@ -975,6 +979,9 @@ def _pid_report(csv_path, out_path, validation_df=None, evaluation_result="NOT E
         'buc_sim_propeller':'Propeller 1 Lever (%)', 'buc_sim_mixture':'Mixture 1 Position (%)',
         'titt':'Ti/Tt response analysis'}
     if selected_graphs is not None:
+        mapping.update({key: simvar for key, simvar, _ in BODY_ACCELERATION_CHANNELS})
+        groups.append(('Body-axis Acceleration', [(simvar, f'Body {simvar[-1]} acceleration (ft/s²)')
+                                                 for _, simvar, _ in BODY_ACCELERATION_CHANNELS]))
         chosen={mapping[key] for key in selected_graphs if key in mapping}
         groups.extend([
             ('Additional Flight and Engine Measurements',[(mapping[key],mapping[key]) for key in ('height_agl_ft','ground_speed_kt','manifold_inhg','fuel_flow_pph')]),

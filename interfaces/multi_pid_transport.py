@@ -201,7 +201,7 @@ class MultiPidBrunnerTransport:
         self.write(struct.pack('<III', 0xCE, int(axis), int(setting_id)) + struct.pack('<' + fmt, value))
 
     def overrides(self, mask: int):
-        for setting_code in (3, 4, 2):
+        for setting_code in (3, 4):
             self.write(struct.pack('<III', 0xD1, int(mask), setting_code))
 
     def read_axis_position(self, axis: int) -> float:
@@ -266,21 +266,21 @@ class MultiPidBrunnerTransport:
                 # Configure Pitch (Axis 1)
                 if self.pitch_enabled:
                     self.setting(1, 0x50, 'H', 2400)
-                    self.setting(1, 0x60, 'H', 80)
+                    self.setting(1, 0x60, 'H', 200)
                     self.setting(1, 0x80, 'f', start_pitch)
                     self.setting(1, 0x70, 'B', 1)
 
                 # Configure Roll (Axis 2)
                 if self.roll_needed:
                     self.setting(2, 0x50, 'H', 2400)
-                    self.setting(2, 0x60, 'H', 80)
+                    self.setting(2, 0x60, 'H', 200)
                     self.setting(2, 0x80, 'f', start_roll)
                     self.setting(2, 0x70, 'B', 1)
 
                 # Configure Rudder (Axis 4)
                 if self.yaw_enabled and self.rudder_available:
                     self.setting(4, 0x50, 'H', 2400)
-                    self.setting(4, 0x60, 'H', 80)
+                    self.setting(4, 0x60, 'H', 200)
                     self.setting(4, 0x80, 'f', start_rudder)
                     self.setting(4, 0x70, 'B', 1)
 
@@ -290,15 +290,20 @@ class MultiPidBrunnerTransport:
 
             return start_pitch, start_roll, start_rudder
 
-    def command(self, pitch_pos: Optional[float] = None, roll_pos: Optional[float] = None, rudder_pos: Optional[float] = None):
+    def refresh_watchdog(self):
+        """Maintain an owned session without sending motor positions."""
         with self.device._io_lock:
             if self.closed or self.stop_event.is_set() or not self.owned:
                 raise RuntimeError('PID control ownership released')
             now = time.monotonic()
-
             if now - self.last_watchdog >= 0.4:
                 self.write(struct.pack('<IIH', 0xD8, 0, 1000))
                 self.last_watchdog = now
+
+    def command(self, pitch_pos: Optional[float] = None, roll_pos: Optional[float] = None, rudder_pos: Optional[float] = None):
+        with self.device._io_lock:
+            self.refresh_watchdog()
+            now = time.monotonic()
 
             if self.pitch_enabled and pitch_pos is not None:
                 if self.pitch_feedback_time is None or now - self.pitch_feedback_time > 0.35:
@@ -328,10 +333,10 @@ class MultiPidBrunnerTransport:
         with self.device._io_lock:
             self.closed = True
             if not self.owned:
-                return
-            errors = []
-            operations = []
+                return []
+            self.owned = False
 
+            operations = []
             if self.pitch_enabled:
                 operations.append(lambda: self.setting(1, 0x70, 'B', 0))
             if self.roll_needed:
@@ -341,18 +346,14 @@ class MultiPidBrunnerTransport:
 
             operations.extend([
                 lambda: self.overrides(0),
-                lambda: self.write(struct.pack('<III', 0xD1, 0, 6)),
+                lambda: self.write(struct.pack('<IIH', 0xD8, 0, 0)),
             ])
 
+            errors = []
             for op in operations:
                 try:
                     op()
                 except Exception as exc:
                     errors.append(str(exc))
-
-            if errors:
-                raise RuntimeError('PID release incomplete: ' + '; '.join(errors))
-
-            self.write(struct.pack('<IIH', 0xD8, 0, 0))
-            self.owned = False
+            return errors
 

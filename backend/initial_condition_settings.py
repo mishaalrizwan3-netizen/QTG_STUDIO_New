@@ -9,6 +9,24 @@ import tempfile
 FIELDS = ('Flt cond', 'Alt[ft]', 'IAS[kts]', 'Flaps', 'Latitude[deg]',
           'Longitude[deg]', 'Heading[deg]', 'Pitch[deg]', 'Bank[deg]',
           'Throttle[%]', 'Temperature[C]')
+BODY_ACCELERATION_FIELDS = tuple(f'Body {axis} acceleration [ft/s²]' for axis in 'XYZ')
+SETTINGS_FIELDS = FIELDS + BODY_ACCELERATION_FIELDS
+
+
+def body_acceleration_overrides(values):
+    overrides = {}
+    for axis, field in zip('XYZ', BODY_ACCELERATION_FIELDS):
+        raw = values.get(field, '').strip()
+        if not raw:
+            continue
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError(f'{field} must be a finite number') from exc
+        if not math.isfinite(value):
+            raise ValueError(f'{field} must be a finite number')
+        overrides[axis] = value
+    return overrides
 
 RANGES = {'Alt[ft]': (-1500, 60000), 'IAS[kts]': (0, 400), 'Flaps': (0, 10),
           'Latitude[deg]': (-90, 90), 'Longitude[deg]': (-180, 180),
@@ -17,6 +35,7 @@ RANGES = {'Alt[ft]': (-1500, 60000), 'IAS[kts]': (0, 400), 'Flaps': (0, 10),
 
 
 def validate(values, *, require_complete=False):
+    body_acceleration_overrides(values)
     missing = [key for key in FIELDS if not values.get(key, '').strip()]
     if require_complete and missing:
         raise ValueError('Initial conditions not set: ' + ', '.join(missing))
@@ -61,7 +80,7 @@ def load(root, reference):
             or not isinstance(data.get('initial_conditions'), dict)):
         raise ValueError('Saved initial conditions do not match this test')
     values = data['initial_conditions']
-    if any(key not in FIELDS or not isinstance(value, str) for key, value in values.items()):
+    if any(key not in SETTINGS_FIELDS or not isinstance(value, str) for key, value in values.items()):
         raise ValueError('Saved initial conditions contain unsupported fields')
     return values
 
@@ -69,24 +88,26 @@ def load(root, reference):
 def load_visible_fields(root, reference):
     path = _path(root, reference)
     if not path.exists():
-        return list(FIELDS)
+        return list(SETTINGS_FIELDS)
     data = json.loads(path.read_text(encoding='utf-8-sig'))
-    visible = data.get('visible_fields', list(FIELDS))
-    if not isinstance(visible, list) or any(field not in FIELDS for field in visible) or len(set(visible)) != len(visible):
+    visible = data.get('visible_fields', list(SETTINGS_FIELDS))
+    if not isinstance(visible, list) or any(field not in SETTINGS_FIELDS for field in visible) or len(set(visible)) != len(visible):
         raise ValueError('Saved initial condition fields are invalid')
+    if not any(field in data.get('initial_conditions', {}) for field in BODY_ACCELERATION_FIELDS):
+        visible.extend(field for field in BODY_ACCELERATION_FIELDS if field not in visible)
     return visible
 
 
 def save(root, reference, values, *, visible_fields=None, validate_values=True):
     path = _path(root, reference)
-    if set(values) != set(FIELDS) or any(not isinstance(v, str) for v in values.values()):
+    if not set(FIELDS) <= values.keys() <= set(SETTINGS_FIELDS) or any(not isinstance(v, str) for v in values.values()):
         raise ValueError('Initial conditions must contain the expected fields')
     if validate_values:
         validate(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     if visible_fields is None:
         visible_fields = load_visible_fields(root, reference)
-    if any(field not in FIELDS for field in visible_fields) or len(set(visible_fields)) != len(visible_fields):
+    if any(field not in SETTINGS_FIELDS for field in visible_fields) or len(set(visible_fields)) != len(visible_fields):
         raise ValueError('Invalid initial condition fields')
     data = json.dumps({'reference': reference, 'initial_conditions': values,
                        'visible_fields': list(visible_fields)}, indent=2) + '\n'

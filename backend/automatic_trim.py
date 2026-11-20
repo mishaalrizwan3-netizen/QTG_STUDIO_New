@@ -1,4 +1,4 @@
-"""Automatic Pitch Trim test using Prepar3D trim-increment events."""
+"""Automatic Pitch Trim test using Prepar3D trim events."""
 import ctypes
 import math
 from pathlib import Path
@@ -8,13 +8,19 @@ import time
 import json
 
 from backend.automatic_control import AutomaticControl, measured_control_fields, recorded_flight_fields
+from backend.initializer import apply_body_acceleration
 
 REF = '2.a.(7)'
 LEGACY_REF = '2.a.(4)'
 METHOD = 'pitch_trim'
 UP, DOWN = 910, 911
-TRIM_STEP_INTERVAL = 1.0       # 1 second wait between trim steps
+SET_TRIM = 912
+TRIM_STEP_INTERVAL = 1.0
+TRIM_STEP_FRACTION = 0.001
+TRIM_TARGET_TOLERANCE = 0.00025
+CALIBRATION_STEP_FRACTION = 0.04
 HOLD_FINAL_SECONDS = 1.0       # Hold final position for 1 second
+MIN_RECORDING_SECONDS = 3.0
 START_HOLD_SECONDS = 1.0       # Wait 1 second and confirm starting position
 UNRESPONSIVE_LIMIT = 3         # Fail if trim does not respond for 3 consecutive attempts when not at limit
 CHANNELS = (('trim_rad', 'ELEVATOR TRIM POSITION', 'radians'),
@@ -37,6 +43,7 @@ class TrimEvents:
         self.mapping.argtypes, self.mapping.restype = [p, u, ctypes.c_char_p], ctypes.c_int32
         self.transmit = self.dll.SimConnect_TransmitClientEvent
         self.transmit.argtypes, self.transmit.restype = [p, u, u, u, u, u], ctypes.c_int32
+        self.target_mapped = False
         for identifier, name in ((UP, b'ELEV_TRIM_UP'), (DOWN, b'ELEV_TRIM_DN')):
             self._check(self.mapping(self.handle, identifier, name))
 
@@ -50,6 +57,16 @@ class TrimEvents:
             raise ValueError('Invalid trim direction')
         self._check(self.transmit(self.handle, 0, direction, 0, 1, 0x10))
 
+    def set_fraction(self, fraction):
+        if not math.isfinite(fraction) or not -1.0 <= fraction <= 1.0:
+            raise ValueError('Invalid elevator trim target')
+        if not self.target_mapped:
+            self._check(self.mapping(self.handle, SET_TRIM, b'AXIS_ELEV_TRIM_SET'))
+            self.target_mapped = True
+        # Prepar3D's trim-axis event uses the opposite sign to ELEVATOR TRIM PCT.
+        axis = round(-fraction * 16383)
+        self._check(self.transmit(self.handle, 0, SET_TRIM, axis & 0xFFFFFFFF, 1, 0x10))
+
 
 class AutomaticTrim(AutomaticControl):
     def __init__(self, context, sim, brunner, publish, reader, *, clock=time.monotonic, brake_reader=None, events=None):
@@ -61,6 +78,7 @@ class AutomaticTrim(AutomaticControl):
         from backend.pid_assist import PidAssist
         self.pid_assist = PidAssist(self.context, owned_axis_mask=0)
         self.test_ref = REF
+        self.trim_step_fraction = CALIBRATION_STEP_FRACTION if context['test_reference'] == REF else TRIM_STEP_FRACTION
         self.axis_name = 'Pitch trim'
         self.reader = reader
         self.events = events if events is not None else TrimEvents(reader)
@@ -85,7 +103,7 @@ class AutomaticTrim(AutomaticControl):
 
         # Recording state machine:
         # Step 3: Click Start Recording -> Begin recording actual trim position
-        # Step 4: Send one ELEV_TRIM_DN SimConnect event
+        # Step 4: Command a decrease of 0.1 percentage points
         # Step 5: Wait 1 second while recording actual trim position
         # Step 6: Repeat one trim step + 1s wait until verified full nose-down limit
         # Step 7: Hold final position for 1 second
@@ -93,7 +111,8 @@ class AutomaticTrim(AutomaticControl):
         self.record_state = 'IDLE'
         self.step_count = 0
         self.step_sent_time = None
-        self.step_start_pos = None
+        self.trim_start_fraction = None
+        self.trim_target = None
         self.unresponsive_steps = 0
         self.verified_nose_down_limit = None
         self.final_trim_pos = None
@@ -106,7 +125,7 @@ class AutomaticTrim(AutomaticControl):
 
     def status(self):
         state = super().status()
-        state['duration_s'] = 62
+        state['duration_s'] = math.ceil(math.ceil(2.0 / self.trim_step_fraction) * TRIM_STEP_INTERVAL + HOLD_FINAL_SECONDS)
         state['engine_text'] = 'Engine: Pitch Trim Test'
         if self.init_trim_phase != 'DONE':
             state['can_record'] = False
@@ -160,7 +179,8 @@ class AutomaticTrim(AutomaticControl):
                 self.rows = []
                 self.step_count = 0
                 self.step_sent_time = None
-                self.step_start_pos = None
+                self.trim_start_fraction = None
+                self.trim_target = None
                 self.unresponsive_steps = 0
                 self.details = 'Starting pitch trim recording...'
             except Exception as exc:
@@ -246,6 +266,7 @@ class AutomaticTrim(AutomaticControl):
                     if self.init_hold_start is not None and now - self.init_hold_start >= START_HOLD_SECONDS:
                         self.start_trim_pos = self.verified_nose_up_limit
                         self._pause_for_ready()
+                        apply_body_acceleration(self.sim, self.context)
                         self.phase = 'READY'
                         self.stage = 'READY TO RECORD'
                         self.details = f"Verified nose-up limit: {self.start_trim_pos:+.3f}. Ready to record."
@@ -293,14 +314,11 @@ class AutomaticTrim(AutomaticControl):
                 if self.start_trim_pos is None:
                     self.start_trim_pos = pos
 
-                # 4. Send one ELEV_TRIM_DN SimConnect event
+                # Start from the measured percentage and command one step per second.
                 if self.record_state == 'RECORDING_START':
-                    self.events.step(DOWN)
-                    self.step_count = 1
-                    self.step_sent_time = now
-                    self.step_start_pos = pos
+                    self.trim_start_fraction = min(1.0, max(-1.0, float(frame['trim_fraction'])))
+                    self._send_trim_target(now)
                     self.record_state = 'WAIT_STEP'
-                    self.details = f"Step 1: Trim DOWN sent. Waiting 1.0 s... (Trim: {pos:+.3f})"
                     return
 
                 # 5 & 6. Wait 1 second while recording actual trim position; repeat until verified full nose-down limit
@@ -310,56 +328,36 @@ class AutomaticTrim(AutomaticControl):
                         self.details = f"Step {self.step_count}: Recording actual trim ({step_elapsed:.1f}/1.0 s) | Pos: {pos:+.3f}"
                         return
 
-                    # 1 second wait complete: verify actual trim position after step
-                    delta_down = self.step_start_pos - pos
-
-                    if delta_down > 0.0005:
-                        # Trim moved down as commanded!
-                        self.unresponsive_steps = 0
-                        # Send next ELEV_TRIM_DN event
-                        self.events.step(DOWN)
-                        self.step_count += 1
-                        self.step_sent_time = now
-                        self.step_start_pos = pos
-                        self.details = f"Step {self.step_count}: Trim DOWN sent. Waiting 1.0 s... (Trim: {pos:+.3f})"
-                        return
-                    else:
-                        # Trim did not move further down on this step.
+                    if abs(frame['trim_fraction'] - self.trim_target) > TRIM_TARGET_TOLERANCE:
                         self.unresponsive_steps += 1
-                        total_down = self.start_trim_pos - pos
+                        if self.unresponsive_steps >= UNRESPONSIVE_LIMIT:
+                            raise RuntimeError(f"P3D elevator trim did not reach {self.trim_target * 100:+.1f}% (measured {trim_pct:+.2f}%)")
+                        self.events.set_fraction(self.trim_target)
+                        self.step_sent_time = now
+                        self.details = f"Waiting for P3D to reach trim target {self.trim_target * 100:+.1f}%"
+                        return
+                    self.unresponsive_steps = 0
+                    if self.trim_target > -1.0:
+                        self._send_trim_target(now)
+                        return
 
-                        # Detect if verified full nose-down limit has been reached:
-                        # Either it reached the absolute lower limit (pos <= -0.999), or
-                        # it reached the nose-down region (pos <= 0.0) having traveled down (total_down >= 0.2) and stopped advancing (unresponsive >= 2)
-                        limit_reached = (pos <= -0.999) or (pos <= 0.0 and total_down >= 0.2 and self.unresponsive_steps >= 2)
-                        if limit_reached:
-                            self.verified_nose_down_limit = pos
-                            self.final_trim_pos = pos
-                            self.travel_end_time = now
-                            self.total_travel_time = max(0.1, self.travel_end_time - self.travel_start_time)
-                            self.total_travel_amount = abs(self.start_trim_pos - self.final_trim_pos)
-                            self.average_trim_rate_pos = self.total_travel_amount / self.total_travel_time
-                            self.average_trim_rate_pct = (abs(self.rows[0]['Elevator Trim (%)'] - trim_pct)) / self.total_travel_time
-
-                            # 7. Hold the final position for 1 second
-                            self.record_state = 'HOLD_FINAL'
-                            self.hold_start_time = now
-                            self.details = f"Nose-down limit reached ({pos:+.3f}). Holding final position for 1.0 s..."
-                            return
-                        elif self.unresponsive_steps >= UNRESPONSIVE_LIMIT:
-                            raise RuntimeError(f"P3D elevator trim stopped responding at position {pos:+.3f} before reaching nose-down limit")
-                        else:
-                            # Retry sending one trim down event to verify limit vs temporary lag
-                            self.events.step(DOWN)
-                            self.step_sent_time = now
-                            self.step_start_pos = pos
-                            self.details = f"Trim verifying limit ({self.unresponsive_steps}/{UNRESPONSIVE_LIMIT}), retrying DOWN..."
-                            return
+                    self.verified_nose_down_limit = self.final_trim_pos = pos
+                    self.travel_end_time = now
+                    self.total_travel_time = max(0.1, now - self.travel_start_time)
+                    self.total_travel_amount = abs(self.start_trim_pos - pos)
+                    self.average_trim_rate_pos = self.total_travel_amount / self.total_travel_time
+                    self.average_trim_rate_pct = abs(self.rows[0]['Elevator Trim (%)'] - trim_pct) / self.total_travel_time
+                    self.record_state = 'HOLD_FINAL'
+                    self.hold_start_time = now
+                    self.details = f"Nose-down limit reached ({pos:+.3f}). Holding final position for 1.0 s..."
+                    return
 
                 # 7. Hold final position for 1 second
                 elif self.record_state == 'HOLD_FINAL':
                     hold_elapsed = now - self.hold_start_time
-                    if hold_elapsed < HOLD_FINAL_SECONDS:
+                    if abs(frame['trim_fraction'] + 1.0) > TRIM_TARGET_TOLERANCE:
+                        raise RuntimeError('P3D elevator trim left the nose-down limit during the final hold')
+                    if hold_elapsed < HOLD_FINAL_SECONDS or now - self.t_start < MIN_RECORDING_SECONDS:
                         self.details = f"Holding final position ({hold_elapsed:.1f}/1.0 s) | Pos: {pos:+.3f}"
                         return
 
@@ -374,13 +372,17 @@ class AutomaticTrim(AutomaticControl):
             if self.last_frame_time is not None and (now - self.last_frame_time > watchdog_limit):
                 raise RuntimeError('Trim telemetry stopped advancing')
 
-            if now - self.t_start > 120.0:
-                raise RuntimeError('Pitch trim recording timed out after 120 s')
-
         except Exception as exc:
             self.finish('FAILED', str(exc))
         finally:
             self._maybe_emit(now)
+
+    def _send_trim_target(self, now):
+        self.step_count += 1
+        self.trim_target = max(-1.0, self.trim_start_fraction - self.step_count * self.trim_step_fraction)
+        self.events.set_fraction(self.trim_target)
+        self.step_sent_time = now
+        self.details = f"Step {self.step_count}: Target trim {self.trim_target * 100:+.1f}%"
 
     def finish(self, result, reason):
         if self.phase == 'DONE':

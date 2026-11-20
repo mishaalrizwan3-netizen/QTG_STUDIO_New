@@ -11,6 +11,9 @@ import threading
 import time
 
 SOURCE = 'SMK_IAS_PID_BRUNNER_ONLY_V4_1.py'
+CLIMB_BANK_LIMIT_DEG = 20.
+CLIMB_BANK_ABORT_DEG = 30.
+CLIMB_BANK_RECOVERY_S = 5.
 CLIMB_PROFILE = {
     'pitch':dict(kp=.030,ki=.004,kd=.045,invert=False),
     'ias':dict(kp=.32,ki=.010,kd=.45,min_pitch=-15.,max_pitch=15.),
@@ -227,6 +230,10 @@ def resume_initialization(window):
         window.stop_worker_event.wait(.04)
 
 
+class ClimbBankLimitError(RuntimeError):
+    """The aircraft left the pitch-only climb envelope."""
+
+
 def verify_live_temperature(window,timeout_s=15.):
     """Weather interpolation needs a running simulator; retain actual-OAT verification."""
     target=window.pid_conditions['temperature_c']
@@ -244,14 +251,19 @@ def verify_live_temperature(window,timeout_s=15.):
                 window.stop_worker_event.wait(.1)
                 continue
             raise
-        if abs(float(data['bank_angle']))>20 or float(data['airspeed_indicated'])<10:
+        bank = float(data['bank_angle'])
+        if abs(bank) >= CLIMB_BANK_ABORT_DEG:
+            raise ClimbBankLimitError(f'Bank reached {abs(bank):.1f}° during weather verification. Level the wings before restarting.')
+        if float(data['airspeed_indicated'])<10:
             raise RuntimeError('Aircraft outside PID envelope during initial weather verification.')
         actual=float(data.get('ambient_temp',float('nan')))
-        if math.isfinite(actual) and abs(actual-target)<=2.:
+        if abs(bank) <= CLIMB_BANK_LIMIT_DEG and math.isfinite(actual) and abs(actual-target)<=2.:
             getattr(window,'_session_context',{})['pid_temperature_check']={'verified':True,'requested_c':target,'actual_c':actual}
             return data
         if time.monotonic()>=deadline:
             getattr(window,'_session_context',{})['pid_temperature_check']={'verified':False,'requested_c':target,'actual_c':actual}
+            if abs(bank) > CLIMB_BANK_LIMIT_DEG:
+                raise ClimbBankLimitError(f'Bank was {abs(bank):.1f}° at the end of weather verification. Level the wings before restarting.')
             raise RuntimeError(f'Initial temperature did not settle: requested {target:g} C, actual {actual:.2f} C. Check simulator weather or external weather overrides.')
         window.stop_worker_event.wait(.1)
 
@@ -303,7 +315,7 @@ def prepare(window,base,context):
     if context['test_reference']!='1.c.(1)': raise ValueError('PID is supported only for normal climb.')
     from qtg_common_engine import universal_initialization_enabled
     universal = universal_initialization_enabled(window)
-    cfg=options(dict(context.get('pid_conditions') or {},target_ias=80.))
+    cfg=options(context.get('pid_conditions'))
     window.pid_automatic_workflow=True
     window._external_control_active=not universal
     window.pid_ready=False
@@ -311,7 +323,7 @@ def prepare(window,base,context):
     window.pid_initial_resume_count=0
     window._pid_loop_pause_count=0
     context['pid_conditions']=cfg
-    context['pid_workflow']=dict(target_ias=80.,band_kt=1.,hold_s=5.,timeout_s=None,duration_s=window.target_duration_sec)
+    context['pid_workflow']=dict(target_ias=cfg['target_ias'],band_kt=1.5,hold_s=5.,timeout_s=None,duration_s=window.target_duration_sec)
     window.test_mode='auto'
     window.active_manual_ref_path=None
     window.selected_ref_csv=None
@@ -340,6 +352,8 @@ def prepare(window,base,context):
                 actual=adapter.prepare_conditions()
             else:
                 actual=apply_manual_conditions(window,initial)
+                from backend.initializer import apply_body_acceleration
+                apply_body_acceleration(window.p3d, context)
             check_cancel(window)
             context['pid_initialization_method']='Shared Manual initialization'
             check_cancel(window)
@@ -348,13 +362,11 @@ def prepare(window,base,context):
             window.pid_controller_active=False
             window.pid_record_requested=False
             window.pid_forwarding_check={'verified':False,'status':'Pending measured response to real PID commands after aircraft settling.'}
-            context["pid_profile"]=CLIMB_PROFILE
             window.pid_conditions=cfg
             window.pid_fault=None
             window.pid_diagnostics=[]
             window.pid_phase='starting'
             window.sig_update_stage.emit(base.STAGE_INITIALIZING,'Completing live aircraft initialization before starting PID.')
-            window.pid_profile=CLIMB_PROFILE
             window.is_recording=False
             for name in ('rec_time','p_pos_buf','r_pos_buf','y_pos_buf','p_force_buf','r_force_buf','y_force_buf','p3d_tele_buf','applied_force_buf','virtual_force_buf','replay_command_buf'):
                 getattr(window,name).clear()
@@ -382,10 +394,13 @@ def prepare(window,base,context):
 
 class StabilizationGate:
     """Monotonic-time state: every out-of-band sample restarts the hold."""
-    def __init__(self): self.since=None
+    def __init__(self, target_ias=80., band_kt=1.):
+        self.target_ias = target_ias
+        self.band_kt = band_kt
+        self.since = None
     def update(self,now,ias,started):
         if not math.isfinite(ias): raise RuntimeError('Invalid IAS feedback.')
-        if abs(ias-80.)>1.: self.since=None; return False
+        if abs(ias-self.target_ias)>self.band_kt: self.since=None; return False
         if self.since is None:self.since=now
         return now-self.since>=5.
 
@@ -393,14 +408,18 @@ class StabilizationGate:
 def loop(window,base):
     device=window.brunner
     failed=None
+    failure_stage = base.STAGE_CONNECTION_ERROR
     try:
-        PitchPID,AirspeedController,slew=controller_types()
         cfg=window.pid_conditions
         device.strict_io=True
         device.pid_position_nodes=True
         check_cancel(window)
         window.pid_axes=discover_axes(device)
         automatic=getattr(window,'pid_automatic_workflow',False)
+        if automatic:
+            from backend.multi_pid_runner import AirspeedController, PitchPID, slew_position as slew
+        else:
+            PitchPID,AirspeedController,slew=controller_types()
         if automatic:
             check_cancel(window)
             resume_initialization(window)
@@ -424,17 +443,34 @@ def loop(window,base):
         current=device.read_axis(device.AXIS_PITCH)[0]
         data=fresh(window,window.p3d.get_telemetry_sequence())
         profile=getattr(window,'pid_profile',CLIMB_PROFILE)
-        pid=PitchPID(**profile['pitch']); outer=AirspeedController(**profile['ias'])
+        pid = PitchPID() if automatic else PitchPID(**profile['pitch'])
         pid.reset(current)
-        seed=initialize_airspeed_controller(outer,cfg,profile,-float(data['pitch_angle']),float(data['airspeed_indicated']))
-        getattr(window,'_session_context',{})['pid_guidance_initialization']=seed
+        actual_pitch = -float(data['pitch_angle'])
+        if automatic:
+            outer = AirspeedController()
+            outer.reset(actual_pitch)
+            seed = dict(calibrated_climb_trim=False, overspeed_startup_correction=False,
+                        integral_seed_deg=outer.integral, initial_command_deg=outer.cmd_pitch)
+        else:
+            outer=AirspeedController(**profile['ias'])
+            seed=initialize_airspeed_controller(outer,cfg,profile,actual_pitch,float(data['airspeed_indicated']))
+        context = getattr(window, '_session_context', {})
+        context['pid_guidance_initialization'] = seed
+        context['pid_profile'] = {
+            'pitch': dict(kp=pid.kp, ki=pid.ki, kd=pid.kd, invert=pid.invert),
+            'ias': dict(kp=outer.kp, ki=outer.ki, kd=outer.kd,
+                        min_pitch=outer.min_pitch, max_pitch=outer.max_pitch),
+            'slew': CLIMB_PROFILE['slew'],
+        }
         velocity=0.; mismatch=None
         recording_started=None
+        bank_recovery_started = None
         window.pid_phase='stabilizing' if automatic else 'holding'
-        gate=StabilizationGate()
+        gate=StabilizationGate(cfg['target_ias'], 1.5)
         response=PIDResponseVerifier()
-        window.pid_stabilization={'achieved':False,'band_kt':1.,'hold_s':5.,'timeout_s':None}
-        if automatic: window.sig_update_stage.emit('Stabilizing Airspeed','Holding 80 kt within +/-1 kt for 5 continuous seconds.')
+        window.pid_stabilization={'achieved':False,'band_kt':gate.band_kt,'hold_s':5.,'timeout_s':None}
+        if automatic:
+            window.sig_update_stage.emit('Stabilizing Airspeed', f'Holding {gate.target_ias:g} kt within +/-{gate.band_kt:g} kt for 5 continuous seconds.')
         started=last=time.monotonic()
         tick=started
         while window.pid_controller_active and not window.stop_worker_event.is_set():
@@ -460,7 +496,8 @@ def loop(window,base):
                         raise RuntimeError('Simulator paused during PID Automatic; test incomplete.')
                     # Reset stabilization gate so the 5-second hold timer
                     # restarts cleanly once P3D resumes.
-                    gate=StabilizationGate()
+                    gate.since = None
+                    mismatch = None
                     window.pid_phase='stabilizing'
                     watchdog(device)
                     last=time.monotonic();tick=last
@@ -474,18 +511,46 @@ def loop(window,base):
             axes=measured_axes(window)
             now=time.monotonic();dt=max(.001,now-last);last=now
             if dt>.35: raise RuntimeError('PID feedback/command cycle exceeded watchdog limit.')
+            bank_deg = float(data['bank_angle'])
             if float(data['airspeed_indicated'])<10: raise RuntimeError('IAS below PID operating range.')
-            if abs(float(data['bank_angle']))>20: raise RuntimeError('Bank exceeded climb PID envelope.')
+            bank_outside_limit = abs(bank_deg) > CLIMB_BANK_LIMIT_DEG
+            if bank_outside_limit:
+                if not automatic or recording_started is not None or abs(bank_deg) >= CLIMB_BANK_ABORT_DEG:
+                    raise ClimbBankLimitError(f'Bank reached {abs(bank_deg):.1f}° during climb PID. Level the wings before restarting.')
+                gate.since = None
+                if bank_recovery_started is None:
+                    bank_recovery_started = now
+                    window.sig_update_stage.emit('Recovering Bank', 'Level the wings to resume airspeed stabilization. Pitch PID remains active.')
+                elif now - bank_recovery_started >= CLIMB_BANK_RECOVERY_S:
+                    raise ClimbBankLimitError('Bank stayed above 20° for five seconds during climb stabilization.')
+            elif bank_recovery_started is not None:
+                bank_recovery_started = None
+                window.sig_update_stage.emit('Stabilizing Airspeed', f'Holding {gate.target_ias:g} kt within +/-{gate.band_kt:g} kt for 5 continuous seconds.')
             cfg=window.pid_conditions
-            profile=getattr(window,'pid_profile',CLIMB_PROFILE)
-            for key in ('kp','ki','kd'):
-                setattr(pid,key,profile['pitch'][key]);setattr(outer,key,profile['ias'][key])
-            if pid.invert!=profile['pitch']['invert']: pid.integral=0.
-            pid.invert=profile['pitch']['invert']
+            if not automatic:
+                profile=getattr(window,'pid_profile',CLIMB_PROFILE)
+                for key in ('kp','ki','kd'):
+                    setattr(pid,key,profile['pitch'][key])
+                    setattr(outer,key,profile['ias'][key])
+                if pid.invert!=profile['pitch']['invert']: pid.integral=0.
+                pid.invert=profile['pitch']['invert']
             pitch=-float(data['pitch_angle'])
-            target=outer.update(cfg['target_ias'],float(data['airspeed_indicated']),dt,pitch)
-            desired=pid.update(target,pitch,dt)
-            current,velocity=slew(current,velocity,desired,dt,**CLIMB_PROFILE['slew'])
+            control_dt = min(dt, .10) if automatic else dt
+            target=outer.update(cfg['target_ias'],float(data['airspeed_indicated']),control_dt,pitch)
+            desired=pid.update(target,pitch,control_dt)
+            requested,velocity=slew(current,velocity,desired,control_dt,**CLIMB_PROFILE['slew'])
+            measured_pitch = axes[0][0]
+            if not math.isfinite(measured_pitch):
+                raise RuntimeError('Invalid BRUNNER pitch position feedback.')
+            max_lead = .28 if automatic else .24
+            current = max(measured_pitch - max_lead, min(measured_pitch + max_lead, requested))
+            control_elapsed=now-started
+            if abs(requested - current) > 1e-6:
+                mismatch = now if mismatch is None else mismatch
+                if now - mismatch > (6. if control_elapsed < 6. else 3.):
+                    raise RuntimeError('CLS2sim pitch position did not track PID command.')
+            else:
+                mismatch = None
             if window.stop_worker_event.is_set(): break
             with device._io_lock:
                 if window.stop_worker_event.is_set(): break
@@ -493,14 +558,9 @@ def loop(window,base):
             getattr(window, '_session_context', {})['pid_runtime'] = {
                 'command_axes': ['pitch'], 'updated_at': time.time(),
             }
-            if abs(current-axes[0][0])>.25:
-                mismatch=now if mismatch is None else mismatch
-                if now-mismatch>2.5: raise RuntimeError('CLS2sim pitch position did not track PID command.')
-            else: mismatch=None
-            control_elapsed=now-started
             if automatic:
                 window.pid_forwarding_check=response.update(current,axes[0][0],float(data.get('surface_elevator_rad',float('nan'))))
-            stable=gate.update(now,float(data['airspeed_indicated']),started) if automatic and recording_started is None else False
+            stable=gate.update(now,float(data['airspeed_indicated']),started) if automatic and recording_started is None and not bank_outside_limit else False
             if recording_started is None and (stable and response.verified if automatic else getattr(window,'pid_record_requested',False)):
                 from qtg_common_engine import universal_initialization_enabled
                 if universal_initialization_enabled(window):
@@ -532,6 +592,8 @@ def loop(window,base):
             window.stop_worker_event.wait(max(0.,tick-time.monotonic()))
     except Exception as exc:
         failed=str(exc);window.pid_fault=failed
+        if isinstance(exc, ClimbBankLimitError):
+            failure_stage = getattr(base, 'STAGE_AUTO_BLOCKED', 'Automatic blocked')
     finally:
         window.pid_controller_active=False
         window._external_control_active=False
@@ -560,7 +622,7 @@ def loop(window,base):
                 failed=failed or 'PID metadata save failed: '+str(exc);window.pid_fault=failed
         if window.rec_time: window.sig_recording_finished.emit()
         elif not failed: window.sig_update_stage.emit(base.STAGE_STOPPED_BY_USER,"PID stopped; no test recording was requested.")
-        if failed: window.sig_update_stage.emit(base.STAGE_CONNECTION_ERROR,failed)
+        if failed: window.sig_update_stage.emit(failure_stage,failed)
 
 def report(csv_path,validation_path=None,run_fault=None,selected_graphs=None,target_ias=80):
     """PID validation is independent of replay references. Missing data never passes."""

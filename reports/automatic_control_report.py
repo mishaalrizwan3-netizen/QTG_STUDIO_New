@@ -193,6 +193,14 @@ CHANNEL_CONFIG = {
 }
 
 
+from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS
+
+CHANNEL_CONFIG.update({
+    key: {'col': simvar, 'alt_cols': [simvar, key],
+          'label': f'Body {simvar[-1]} acceleration (ft/s²)', 'group': 'Body-axis Acceleration'}
+    for key, simvar, _ in BODY_ACCELERATION_CHANNELS
+})
+
 CHANNEL_CONFIG.update({
     key: {'col': column, 'alt_cols': [column], 'label': column, 'group': 'Pitch trim'}
     for key, column in (
@@ -333,9 +341,13 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
             trim_subtitle = f"Total Travel Time: {t_time:.1f} s  |  Average Trim Rate: {r_pct:.2f} %/s ({r_pos:.3f} pos/s)"
 
     # Determine which items are requested
+    from reports.plot_graphs import OPTIONAL_GRAPH_COLUMNS
     chosen_items = []
     for key in selected:
         cfg = CHANNEL_CONFIG.get(key)
+        if cfg is None and key in OPTIONAL_GRAPH_COLUMNS:
+            column, _ = OPTIONAL_GRAPH_COLUMNS[key]
+            cfg = dict(col=column, alt_cols=[column, key], label=column, group='Additional measurements')
         if cfg:
             # Look up series
             series = None
@@ -343,7 +355,7 @@ def _render_climb_style_report(csv_path: Path, out_path: Path, context: Dict[str
                 if col_name in df.columns:
                     val = _series(df, col_name)
                     if np.isfinite(val).any():
-                        series = val
+                        series = -val if test_ref in STATIC_CONTROL_REFERENCES and 'Virtual Force' in col_name else val
                         break
             if series is None:
                 series = _series(df, cfg['col'])

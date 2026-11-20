@@ -29,6 +29,7 @@ Standard QTG format with:
 """
 
 from pathlib import Path
+from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS
 
 import math
 
@@ -213,6 +214,23 @@ ALIASES = {
     ],
 
 }
+ALIASES.update({key: [key, simvar] for key, simvar, _ in BODY_ACCELERATION_CHANNELS})
+OPTIONAL_GRAPH_COLUMNS = {
+    'stall_aoa': ('Aircraft Angle of Attack (deg)', 'deg'),
+    'stall_warning': ('Stall Warning (0/1)', '0/1'),
+    'stall_elevator': ('Elevator Surface (rad)', 'rad'),
+    'trim_position_rad': ('Elevator Trim Angle (rad)', 'rad'),
+    'trim_indicator': ('Elevator Trim Indicator (position)', 'position'),
+    'trim_value_pct': ('Elevator Trim (%)', '%'),
+    'trim_elevator_surface_rad': ('Elevator Surface (rad)', 'rad'),
+    'buc_throttle': ('BUC Throttle Z Rotation (%)', '%'),
+    'buc_propeller': ('BUC Propeller Slider (%)', '%'),
+    'buc_mixture': ('BUC Mixture Dial (%)', '%'),
+    'buc_torque': ('Engine Torque (ft lb)', 'ft lb'),
+    'buc_sim_propeller': ('Propeller 1 Lever (%)', '%'),
+    'buc_sim_mixture': ('Mixture 1 Position (%)', '%'),
+}
+ALIASES.update({key: [key, column] for key, (column, _) in OPTIONAL_GRAPH_COLUMNS.items()})
 
 
 
@@ -374,7 +392,7 @@ def _read_csv(path):
 
     if rpm_arr is not None and np.isfinite(rpm_arr).any() and np.nanmax(rpm_arr) > 300.0:
         ff_needs_synth = True
-        for ffc in ("Fuel Flow (pph)", "fuel_flow_pph", "Fuel flow (lb/h)", "actual_fuel_flow_pph"):
+        for ffc in ALIASES["fuel_flow_pph"]:
             if ffc in df.columns:
                 arr = pd.to_numeric(df[ffc], errors="coerce").to_numpy()
                 fin = arr[np.isfinite(arr)]
@@ -410,6 +428,7 @@ def _read_csv(path):
             df["Fuel Flow (pph)"] = calc_ff
             df["fuel_flow_pph"] = calc_ff
             df["Fuel flow (lb/h)"] = calc_ff
+            df.attrs["estimated_fuel_flow_columns"] = ("Fuel Flow (pph)", "fuel_flow_pph", "Fuel flow (lb/h)")
 
     # Sanitize Virtual Force: If CLS2Sim virtual force (0x51) is 0.0 on Sim PC,
     # fall back to measured physical force from the stick load cell
@@ -508,11 +527,23 @@ def _load_engine_dataframe(path):
         yp = y[valid][ind]
 
         high[col] = np.interp(ht, xp, yp, left=np.nan, right=np.nan)
+        if col in legacy.attrs.get("estimated_fuel_flow_columns", ()):
+            high.attrs["estimated_fuel_flow_columns"] = (*high.attrs.get("estimated_fuel_flow_columns", ()), col)
 
     high.attrs["timebase"] = "high_rate_with_1Hz_legacy_visualization_only"
 
     return high
 
+
+
+def _fuel_flow_is_estimated(df):
+    for column in ALIASES["fuel_flow_pph"]:
+        if column in df:
+            values = pd.to_numeric(df[column], errors="coerce").to_numpy()
+            if np.any(np.isfinite(values) & (np.abs(values) > 0.05)):
+                return column in df.attrs.get("estimated_fuel_flow_columns", ())
+    rpm = _series(df, "engine_rpm")
+    return bool(np.isfinite(rpm).any() and np.nanmax(rpm) > 300.0)
 
 
 def _series(df, canonical_key):
@@ -747,6 +778,32 @@ def _resolve_event_time(path, df, kind="acceleration", meta=None):
 
     return 0.0
 
+
+
+def _rpm_settled_time(df, event_time):
+    """Return the start of the stable baseline RPM interval before throttle movement."""
+    if not np.isfinite(event_time) or event_time <= 0:
+        return None
+    times = _series(df, "time_s")
+    finite_times = times[np.isfinite(times)]
+    if not finite_times.size:
+        return None
+    for key in ("prop_rpm", "engine_rpm"):
+        rpm = _series(df, key)
+        valid = np.isfinite(times) & np.isfinite(rpm) & (times < event_time)
+        t, readings = times[valid], rpm[valid]
+        if len(t) < 2 or np.any(np.diff(t) <= 0) or event_time - t[-1] > 1.5:
+            continue
+        baseline_rpm = float(np.median(readings[t >= t[-1] - 1.0]))
+        if baseline_rpm <= 0:
+            continue
+        tolerance = max(25.0, 0.01 * baseline_rpm)
+        outside = np.flatnonzero(np.abs(readings - baseline_rpm) > tolerance)
+        gaps = np.flatnonzero(np.diff(t) > 1.5)
+        start = max(outside[-1] + 1 if outside.size else 0, gaps[-1] + 1 if gaps.size else 0)
+        if start < len(t) and t[-1] - t[start] >= 1.0:
+            return float(t[start])
+    return None
 
 
 def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
@@ -1026,7 +1083,8 @@ def _initial_page(pdf, mode, source_path, sim_df, ref_df=None, metadata=None):
 
     # Clean report notes; detailed diagnostic status remains in recorded metadata.
 
-    ax.text(0.05, 0.18, "Graph time zero: recording start; dotted line: measured throttle movement.", fontsize=8.0, family="monospace")
+    note = (metadata or {}).get("graph_time_note", "Graph time zero: recording start; dotted line: measured throttle movement.")
+    ax.text(0.05, 0.18, note, fontsize=8.0, family="monospace")
 
     ax.text(0.05, 0.10, f"Source: {Path(source_path).name}", fontsize=6.5, family="monospace", color="gray")
 
@@ -1142,23 +1200,34 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
 
 
-    # Time zero event alignment
-
     sim_event = _resolve_event_time(sim_path, sim_df, kind=kind.lower(), meta=metadata)
-
     t_sim = _series(sim_df, "time_s")
-
     t_ref = _series(ref_df, "time_s") if has_ref else None
-
-
+    engine_reference = str((metadata or {}).get("test_reference", ""))
+    align_rpm = engine_reference in ("1.f.(1)", "1.f.(2)") or any(
+        marker in path_text for marker in ("1_f_1", "1_f_2", "engine_acceleration", "engine_deceleration")
+    )
+    settled_at = _rpm_settled_time(sim_df, sim_event) if align_rpm else None
+    offset = settled_at if settled_at is not None else 0.0
+    time_label = "Time from initial RPM settling (s)" if settled_at is not None else "Time from recording start (s)"
+    time_note = "Dotted line marks measured throttle movement."
+    if settled_at is not None:
+        time_note = f"Zero marks initial RPM settling at {settled_at:.2f} s from recording start. " + time_note
+        t_sim = t_sim - offset
+        if has_ref:
+            t_ref = t_ref - offset
+    elif align_rpm:
+        time_note = "Initial RPM settling unverified. Zero marks recording start. " + time_note
+    else:
+        time_note = "Time starts at recording. " + time_note
 
     all_t = list(t_sim[np.isfinite(t_sim)])
-
+    if has_ref and settled_at is not None:
+        all_t.extend(t_ref[np.isfinite(t_ref)])
     min_x = 0.0
 
     max_x = float(max(all_t)) if all_t else 1.0
 
-    # Recording start is zero; the throttle step stays at its measured time.
     if max_x <= min_x:
         max_x = min_x + 1.0
 
@@ -1171,10 +1240,19 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
         report_meta = dict(metadata or {})
 
         report_meta["status"] = status
+        if align_rpm:
+            report_meta["graph_time_note"] = time_note
 
         # Pages 2-4: engine/flight performance ONLY; no control plots
 
         groups = _groups_for_test(kind)
+        body_channels = [
+            (f"Body {simvar[-1]} acceleration", key, "ft/s²", {})
+            for key, simvar, _ in BODY_ACCELERATION_CHANNELS
+            if selected_graphs is not None or np.isfinite(_series(sim_df, key)).any()
+        ]
+        if body_channels:
+            groups = groups + [("Group 4 - Body-axis Acceleration", body_channels)]
         if selected_graphs is not None:
             chosen = set(selected_graphs)
             known = {item[1] for _, entries in groups for item in entries}
@@ -1190,6 +1268,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
                 'elevator_input_norm': ('Elevator input', 'normalised'),
                 'aileron_input_norm': ('Aileron input', 'normalised'),
                 'rudder_input_norm': ('Rudder input', 'normalised'),
+                **OPTIONAL_GRAPH_COLUMNS,
             }
             groups = [(name, [item for item in entries if item[1] in chosen]) for name, entries in groups]
             additional = [(title, key, unit, {'force_axis': {'pitch_force': 'Pitch', 'roll_force': 'Roll', 'rudder_force': 'Yaw'}[key]} if key.endswith('_force') else {})
@@ -1206,13 +1285,13 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
             if compact:
                 fig, axs = plt.subplots(len(channels), 1, figsize=(8.27, 11.69))
-                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.060, hspace=0.38)
+                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.085 if align_rpm else 0.060, hspace=0.38)
                 if len(channels) == 1:
                     axs = [axs]
                 fig.suptitle('Selected test graphs', fontsize=15, fontweight='bold')
             else:
                 fig, axs = plt.subplots(len(channels), 1, figsize=(8.27, 11.69))
-                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.060, hspace=0.38)
+                fig.subplots_adjust(left=0.13, right=0.96, top=0.93, bottom=0.085 if align_rpm else 0.060, hspace=0.38)
                 if len(channels) == 1:
                     axs = [axs]
                 fig.suptitle(f"1st Quadrant Combined {group_name}", fontsize=15, fontweight="bold")
@@ -1221,11 +1300,13 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
             for ax, (title, key, unit, opts) in zip(axs, channels):
 
+                if key == "fuel_flow_pph" and is_auto and kind == "Acceleration" and _fuel_flow_is_estimated(sim_df):
+                    title = "Fuel flow (automatic trace estimated)" if has_ref else "Estimated fuel flow"
                 ax.set_title(title, fontsize=7 if compact else 11, fontweight="bold")
 
                 ax.set_ylabel(unit, fontweight="bold")
 
-                ax.set_xlabel("Time from recording start (s)", fontweight="bold")
+                ax.set_xlabel(time_label, fontweight="bold")
 
 
 
@@ -1438,7 +1519,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                                 ok = np.isfinite(lt) & np.isfinite(lv)
 
-                                ax.plot(lt[ok], lv[ok], ":", linewidth=1.5,
+                                ax.plot(lt[ok] - offset, lv[ok], ":", linewidth=1.5,
 
                                         color="#ca7a12", label=f"{label} legacy 1 Hz (RPM channel conflict)")
 
@@ -1474,7 +1555,9 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
 
                 ax.grid(True, which="minor", alpha=0.20, linewidth=0.45)
 
-                ax.axvline(sim_event, color="gray", linestyle=":", linewidth=1.0)
+                ax.axvline(sim_event - offset, color="gray", linestyle=":", linewidth=1.0)
+                if settled_at is not None:
+                    ax.axvline(0, color="#334155", linewidth=0.8)
                 if key == "throttle_pct":
                     ax.axhline(10, color="#a65e00", linestyle="--", linewidth=1.0, label="10% throttle guide")
                     ax.axhline(90, color="#7452a8", linestyle="--", linewidth=1.0, label="90% throttle guide")
@@ -1504,7 +1587,7 @@ def _render_report(sim_path, ref_path=None, out_path="report.pdf", titt_results=
                      ha="center", fontsize=8, family="monospace")
 
             if kind.lower() in ("acceleration", "deceleration"):
-                fig.text(0.5, 0.033, "Time starts at recording; dotted vertical line marks measured throttle movement.",
+                fig.text(0.5, 0.033, time_note,
                          ha="center", fontsize=7, color="#555555")
             pdf.savefig(fig)
 

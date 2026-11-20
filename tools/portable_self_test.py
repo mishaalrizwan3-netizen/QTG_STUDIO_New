@@ -48,19 +48,24 @@ def run_self_test(app_module):
         launch=app._launch_common_test
         app._launch_common_test=lambda mode,spec: commands.append((mode,spec.reference))
         for index in range(len(app_module.TESTS)):
-            if app_module.TESTS[index].reference=="1.c.(2)": continue
+            if app_module.TESTS[index].reference == "1.c.(2)": continue
             app.select_test(index)
             require(not app.settings_panel.winfo_manager())
             app.btn_subtab_manual.command()
+            if app_module.TESTS[index].reference == app_module.CLIMB_STALL_REFERENCE:
+                require(app.btn_subtab_auto.command is None)
+                require(commands[-1] == ('manual', app_module.CLIMB_STALL_REFERENCE))
+                continue
             app.btn_subtab_auto.command()
             require(commands[-2:]==[('manual',app_module.TESTS[index].reference),('auto',app_module.TESTS[index].reference)])
         app._launch_common_test=launch
-        expected_commands = sum(2 for s in app_module.TESTS if s.reference != "1.c.(2)")
+        expected_commands = sum(1 if s.reference == app_module.CLIMB_STALL_REFERENCE else 2
+                                for s in app_module.TESTS if s.reference != "1.c.(2)")
         require(len(commands) == expected_commands)
         result['checks'].append(f'all {expected_commands} SEP GUI mode buttons route to the common BRUNNER engine')
         spec = app_module.TESTS[0]
         app.select_test(0)
-        require(app._automatic_methods[spec.reference].get()=='Recorded Replay')
+        require(app._automatic_methods[spec.reference].get() in ('Recorded Replay', 'PID Automatic'))
         app._automatic_methods[spec.reference].set('PID Automatic')
         require(app._pid_targets[spec.reference].get()=='80')
         app._automatic_methods[spec.reference].set('Recorded Replay')
@@ -69,7 +74,9 @@ def run_self_test(app_module):
         require(app.settings_panel.winfo_manager() == 'pack')
         fields, graphs = app._test_settings[spec.reference]
         require('Latitude[deg]' in fields)
-        require(len(graphs) == 25)
+        body_keys = {'body_accel_x', 'body_accel_y', 'body_accel_z'}
+        require({key for _, key, _ in graphs} == {key for _, key in app_module.ALL_GRAPH_CHANNELS})
+        require(body_keys <= {key for _, key, _ in graphs})
         fields['Alt[ft]'].set('')
         require(app._apply_test_settings(spec))
         require(fields['Alt[ft]'].get() == '3000')

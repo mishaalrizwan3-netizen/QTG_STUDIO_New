@@ -24,7 +24,7 @@ def _results_root():
             data = json.loads(settings.read_text(encoding='utf-8-sig'))
             configured = data.get('results_directory', '')
             if not isinstance(configured, str) or not configured.strip():
-                raise ValueError('qtg_settings.json must contain a non-empty results_directory')
+                configured = 'D:/QTG_Test_Results' if Path('D:/QTG_Test_Results').exists() else str(Path.home() / 'Documents' / 'QTG_Test_Results')
             path = Path(os.path.expandvars(configured)).expanduser()
             return path if path.is_absolute() else settings.parent / path
         return Path.home() / 'Documents' / 'QTG_Test_Results'
@@ -47,6 +47,10 @@ def brunner_root():
 def load_base():
     if 'qtg_brunner_base' in sys.modules:
         return sys.modules['qtg_brunner_base']
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass and str(meipass) not in sys.path:
+            sys.path.insert(0, str(meipass))
     root = brunner_root()
     def load(name, path):
         spec = importlib.util.spec_from_file_location(name, path)
@@ -280,7 +284,7 @@ from backend.verifier import validate_reference, validate_conditions
 from backend.artifacts import test_directory, named_result
 
 
-from backend.initializer import apply_manual_conditions
+from backend.initializer import apply_body_acceleration, apply_manual_conditions, validate_body_acceleration
 
 
 def launch(mode, spec, output_dir, reference=None, duration_s=None, control_method="replay", pid_conditions=None, validation_csv=None, initial_conditions=None, selected_graphs=None, acceleration_manual_airflow_preparation=False, configuration_revision=None, operator_initiated_universal_manual=False, active_pids=None, target_heading_mag=None, target_bank=None, **extra_options):
@@ -336,6 +340,15 @@ def launch(mode, spec, output_dir, reference=None, duration_s=None, control_meth
              'initial_conditions':initial_conditions,'initial_condition_overrides':initial_condition_overrides,'selected_graphs':selected_graphs,'reference_csv':reference, 'control_method':control_method, 'pid_conditions':pid_conditions, 'validation_csv':validation_csv, 'duration_s':duration_s, 'command_directory':str(output/(token+'_commands')), 'status_file':str(output/(token+'_status.json')),
              'stop_file':str(output/(token+'_stop')), 'results_root':str(output.parent), 'result_directory':str(test_directory(output.parent,spec.reference,spec.title)),
              'initialization_policy':'operator settings for Manual/PID; selected Manual t0 for Recorded Replay'}
+    acceleration = validate_body_acceleration(extra_options.get('initial_body_acceleration'))
+    if acceleration:
+        context['initial_body_acceleration'] = acceleration
+    if control_method == 'static_control':
+        from backend.control_profile import validate_motor_speed, validate_sweep_rate
+        if 'static_sweep_rate' in extra_options:
+            context['static_sweep_rate'] = validate_sweep_rate(extra_options['static_sweep_rate'])
+        if 'static_motor_speed' in extra_options:
+            context['static_motor_speed'] = validate_motor_speed(extra_options['static_motor_speed'])
     if active_pids:
         context['active_pids'] = dict(active_pids)
         context['target_heading_mag'] = float(target_heading_mag if target_heading_mag is not None else ((initial_conditions or {}).get('heading_deg', 0.0)))
@@ -501,7 +514,7 @@ from backend.control import validate_method
 
 
 def send_command(context, action, **values):
-    if action not in ('initialize','record','stop','shutdown','pid_engage','pid_tune','diagnostic_start','diagnostic_stop',
+    if action not in ('initialize','record','stop','shutdown','pid_engage','pid_tune','climb_pid_tune','diagnostic_start','diagnostic_stop',
                       'verification_diagnostic_start','verification_diagnostic_stop','invalidate_initialization'):
         raise ValueError('Unknown engine command')
     directory=Path(context['command_directory'])
@@ -768,6 +781,11 @@ def worker_class(base,context,publish):
                     return
             self._stage_details=details
             if stage==base.STAGE_CONNECTED_READY and self._preparing:
+                try:
+                    apply_body_acceleration(getattr(self, 'p3d', None), context)
+                except (AttributeError, RuntimeError, ValueError) as exc:
+                    self._update_stage_ui(base.STAGE_AUTO_BLOCKED, f'Initial body acceleration: {exc}')
+                    return
                 self._prepared=True
                 self._preparing=False
                 if self._control_method == 'multi_pid':
@@ -875,6 +893,13 @@ def worker_class(base,context,publish):
                     self._prepared = False
                     self._poll_universal_initialization()
                     return
+            if action == 'climb_pid_tune':
+                if (context.get('test_reference') != '1.c.(1)' or self._control_method != 'multi_pid'
+                        or not getattr(self, 'multi_pid_active', False) or self.stop_worker_event.is_set()):
+                    return
+                from backend.multi_pid_runner import validate_climb_pid_settings
+                self._pending_climb_pid_settings = validate_climb_pid_settings(command.get('settings'))
+                return
             if action in ('pid_engage','pid_tune') and getattr(self,'pid_automatic_workflow',False):
                 raise RuntimeError('PID Automatic is managed by the climb execution engine.')
             if action in ('pid_engage','pid_tune'):
@@ -995,6 +1020,7 @@ def worker_class(base,context,publish):
                 if mode == 'manual' and requested_test in ('1.f.(1)', '1.f.(2)'):
                     from backend.engine_conditions import enforce
                     conditions = enforce(requested_test, conditions)
+                acceleration = validate_body_acceleration(command.get('initial_body_acceleration'))
                 # Set Conditions already prepares Manual mode. Selecting Manual again
                 # must not teleport the aircraft or repeat hardware preparation.
                 airflow_preparation = (command.get('acceleration_manual_airflow_preparation') is True
@@ -1003,6 +1029,7 @@ def worker_class(base,context,publish):
                     and bool(context.get('acceleration_manual_airflow_preparation', False)) == airflow_preparation
                     and command.get('test_reference',context['test_reference'])==context['test_reference']
                     and conditions is not None and conditions==getattr(self,'manual_initial_conditions',None)
+                    and acceleration == context.get('initial_body_acceleration', {})
                     and getattr(self,'_prepared',False)
                     and getattr(self,'current_stage',None)==getattr(base,'STAGE_CONNECTED_READY',None)
                     and self.p3d is not None and self.p3d.is_connected() and bool(self.brunner.sock)
@@ -1010,6 +1037,10 @@ def worker_class(base,context,publish):
                 self.manual_initial_conditions=conditions;self.report_initial_conditions=conditions
                 self.report_graphs=command.get('selected_graphs')
                 context.update(initial_conditions=conditions,selected_graphs=self.report_graphs)
+                if acceleration:
+                    context['initial_body_acceleration'] = acceleration
+                else:
+                    context.pop('initial_body_acceleration', None)
                 if airflow_preparation:
                     context['acceleration_manual_airflow_preparation'] = True
                 else:
@@ -1210,6 +1241,8 @@ def worker_class(base,context,publish):
                 if thread and thread.is_alive(): return False
             self.ui_timer.stop()
             if self.p3d: self.p3d.stop()
+            try: self.brunner.release_controls()
+            except Exception: pass
             self.brunner.close()
             self.current_stage='Closed'
             self._stage_details='P3D paused and BRUNNER controls released.'

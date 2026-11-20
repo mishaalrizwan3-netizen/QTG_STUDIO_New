@@ -15,11 +15,14 @@ import sys
 import threading
 import time
 from typing import Dict, Any, Optional
+from interfaces.engine_measurements import body_acceleration_fields
+from backend.initializer import apply_body_acceleration
 
 from backend.control_profile import (
     STATIC_CONTROL_REFERENCES,
     AXIS_INFO,
     StaticControlProfile,
+    validate_motor_speed,
 )
 
 METHOD = 'static_control'
@@ -60,6 +63,7 @@ def recorded_flight_fields(data):
         'X Body Acceleration (g)': _number(data, 'accelX') / 32.17404856,
         'Y Body Acceleration (g)': _number(data, 'accelY') / 32.17404856,
         'Z Body Acceleration (g)': _number(data, 'accelZ') / 32.17404856,
+        **body_acceleration_fields(data),
         'Gross Wt (kg)': _number(data, 'total_weight'),
         'Total Fuel Quantity (kg)': _number(data, 'total_fuel_quantity'),
         'CG Pos (% MAC)': _number(data, 'cg_percent'),
@@ -150,7 +154,9 @@ class AutomaticControl:
                 or self.context.get('live_hardware') is True
             )
 
-        self.profile = StaticControlProfile(self.test_ref, baseline_seconds=1.0, settle_seconds=1.0)
+        self.profile = StaticControlProfile(self.test_ref, baseline_seconds=1.0, settle_seconds=1.0,
+                                            sweep_rate=context.get('static_sweep_rate'))
+        self.motor_speed = validate_motor_speed(context.get('static_motor_speed', self.axis_info['motor_speed']))
         self.startup_timeout = float(context.get('startup_timeout', 120.0))
         self.deadline = clock() + self.startup_timeout
 
@@ -321,7 +327,10 @@ class AutomaticControl:
         total_mask = (self.axis_mask if self.live_hardware else 0) | getattr(self.pid_assist, 'pid_axis_mask', 0)
         if total_mask and self.brunner and getattr(self.brunner, 'sock', None):
             try:
-                self.brunner.configure_replay_mode(axis_mask=total_mask)
+                speed_overrides = {}
+                if self.live_hardware and self.motor_speed != self.axis_info['motor_speed']:
+                    speed_overrides['axis_speeds'] = {self.axis_mask: self.motor_speed}
+                self.brunner.configure_replay_mode(axis_mask=total_mask, **speed_overrides)
                 self.brunner.write_setting(total_mask, 0x70, "B", 1)
                 self.brunner.set_overrides(total_mask, True)
                 self.ownership_verified = True
@@ -516,6 +525,8 @@ class AutomaticControl:
 
                 # Initialization complete and verified. Controls untouched.
                 self._pause_for_ready()
+                if self.context.get('control_method') != 'pitch_trim':
+                    apply_body_acceleration(self.sim, self.context)
                 self.phase = 'READY'
                 self.stage = 'READY TO RECORD'
                 self.details = f"Ready to record {self.axis_name}: Center -> Limits -> Center sweep"
@@ -668,6 +679,7 @@ class AutomaticControl:
                     'X Body Acceleration (g)': _number(self.latest_sim, 'accelX') / 32.17404856,
                     'Y Body Acceleration (g)': _number(self.latest_sim, 'accelY') / 32.17404856,
                     'Z Body Acceleration (g)': _number(self.latest_sim, 'accelZ') / 32.17404856,
+                    **body_acceleration_fields(self.latest_sim),
                     'Elevator Surface (rad)': float(self.latest_sim.get('elevator_deflection', 0.0) or 0.0),
                     'Left Aileron Surface (rad)': float(self.latest_sim.get('aileron_left_deflection', 0.0) or 0.0),
                     'Rudder Surface (rad)': float(self.latest_sim.get('rudder_deflection', 0.0) or 0.0),

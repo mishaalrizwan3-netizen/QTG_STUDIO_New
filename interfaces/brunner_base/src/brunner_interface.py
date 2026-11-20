@@ -196,9 +196,10 @@ class BrunnerInterface:
         self._pid_transport.engage(float(start_position))
 
     @_serialized
-    def configure_replay_mode(self, axis_mask=None):
+    def configure_replay_mode(self, axis_mask=None, *, axis_speeds=None):
         """Prepares motors for automatic test replay with validated servo tuning."""
         axes=self.ALL_AXES if axis_mask is None else int(axis_mask)
+        axis_speeds = axis_speeds or {}
         if not axes or axes & ~self.ALL_AXES: raise ValueError("Invalid automatic axis mask")
         if not self.set_overrides(axes, True) or not self.set_position_forwarding():
             raise RuntimeError("Brunner did not acknowledge Automatic ownership/physical-axis forwarding.")
@@ -206,11 +207,11 @@ class BrunnerInterface:
         self.write_setting(axes, 0xA0, "B", 1)     # Virtual Force Enable
         # Validated AP tracking force and speed parameters (prevents oscillation/thrashing)
         if axes & self.AXIS_PITCH: self.write_setting(self.AXIS_PITCH,  0x50, "H", 1800)  # Pitch AP force
-        if axes & self.AXIS_PITCH: self.write_setting(self.AXIS_PITCH,  0x60, "H", 300)   # Pitch AP speed
+        if axes & self.AXIS_PITCH: self.write_setting(self.AXIS_PITCH,  0x60, "H", axis_speeds.get(self.AXIS_PITCH, 300))
         if axes & self.AXIS_ROLL: self.write_setting(self.AXIS_ROLL,   0x50, "H", 1500)  # Roll AP force
-        if axes & self.AXIS_ROLL: self.write_setting(self.AXIS_ROLL,   0x60, "H", 200)   # Roll AP speed (validated smooth tracking)
+        if axes & self.AXIS_ROLL: self.write_setting(self.AXIS_ROLL,   0x60, "H", axis_speeds.get(self.AXIS_ROLL, 200))
         if axes & self.AXIS_RUDDER: self.write_setting(self.AXIS_RUDDER, 0x50, "H", 1500)  # Rudder AP force
-        if axes & self.AXIS_RUDDER: self.write_setting(self.AXIS_RUDDER, 0x60, "H", 200)   # Rudder AP speed
+        if axes & self.AXIS_RUDDER: self.write_setting(self.AXIS_RUDDER, 0x60, "H", axis_speeds.get(self.AXIS_RUDDER, 200))
         self.write_setting(axes, 0x70, "B", 1)     # Autopilot ON
 
 

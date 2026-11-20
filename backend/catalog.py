@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+CLIMB_STALL_REFERENCE = '2.c.(8c)'
+
 
 @dataclass
 class TestSpec:
@@ -171,6 +173,15 @@ TESTS = [
         "To record the aircraft's approach-to-stall characteristics.",
         "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 0 | Temperature[C]: 15 | Throttle[%]: 80",
         "± 3 kt stall warning speed | ± 2° angle of attack at initial buffet | ± 2° pitch, angle of attack and bank | ± 10% or ± 5 lb stick force where applicable",
+    ),
+    TestSpec(
+        CLIMB_STALL_REFERENCE,
+        "Climb Stall",
+        "Longitudinal Handling",
+        73,
+        "Configure the climb stall case. The test procedure and tolerances are pending.",
+        "Flt cond: Climb",
+        "Pending test procedure",
     ),
     TestSpec(
         "2.c.(9)",

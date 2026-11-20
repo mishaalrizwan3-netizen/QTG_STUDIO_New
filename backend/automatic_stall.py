@@ -7,6 +7,7 @@ import time
 
 from backend.automatic_control import AutomaticControl, _number, recorded_flight_fields
 from backend.stall_events import StallWarningCycle
+from interfaces.engine_measurements import body_acceleration_fields
 
 REF = '2.c.(8b)'
 METHOD = 'stall'
@@ -333,6 +334,7 @@ class AutomaticStall(AutomaticControl):
                 'X Body Acceleration (g)': _acceleration(data, 'X'),
                 'Y Body Acceleration (g)': _acceleration(data, 'Y'),
                 'Z Body Acceleration (g)': _acceleration(data, 'Z'),
+                **body_acceleration_fields(data),
                 'Joystick Pitch Position (mm)': axes[0] * 100.,
                 'Joystick Pitch Force (N)': axes[1] * 100. if abs(axes[1]) <= 5 else axes[1],
                 'Pitch Applied Force (N)': axes[1] * 100. if abs(axes[1]) <= 5 else axes[1],

@@ -31,6 +31,7 @@ AXIS_INFO: Dict[str, dict] = {
         'axis_mask': AXIS_PITCH,
         'limit': 1.0,           # Full travel to -1 and +1 via Autopilot
         'rate': 0.20,           # 20% normalized travel per second (smooth, deliberate)
+        'motor_speed': 300,
         'max_safe_force_n': 350.0,
         'first_direction': 'Forward (-1.0)',
         'second_direction': 'Backward (+1.0)',
@@ -43,6 +44,7 @@ AXIS_INFO: Dict[str, dict] = {
         'axis_mask': AXIS_ROLL,
         'limit': 1.0,           # Full travel to -1 and +1 via Autopilot
         'rate': 0.20,
+        'motor_speed': 200,
         'max_safe_force_n': 250.0,
         'first_direction': 'Left (-1.0)',
         'second_direction': 'Right (+1.0)',
@@ -55,6 +57,7 @@ AXIS_INFO: Dict[str, dict] = {
         'axis_mask': AXIS_RUDDER,
         'limit': 1.0,           # Full travel to -1 and +1 via Autopilot
         'rate': 0.20,
+        'motor_speed': 200,
         'max_safe_force_n': 450.0,
         'first_direction': 'Left Pedal (-1.0)',
         'second_direction': 'Right Pedal (+1.0)',
@@ -75,17 +78,37 @@ class ProfileSegment:
     name: str
 
 
+def validate_sweep_rate(value):
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        raise ValueError('Sweep speed must be a positive number in normalized units/s.') from None
+    if not math.isfinite(rate) or rate <= 0 or not math.isfinite(4.0 / rate):
+        raise ValueError('Sweep speed must be a positive finite number in normalized units/s.')
+    return rate
+
+
+def validate_motor_speed(value):
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        raise ValueError('CLS2Sim motor speed must be a whole number from 5 to 9999.') from None
+    if not 5 <= speed <= 9999 or not speed.is_integer():
+        raise ValueError('CLS2Sim motor speed must be a whole number from 5 to 9999.')
+    return int(speed)
+
+
 class StaticControlProfile:
     """Computes smooth trajectory for static control testing."""
 
-    def __init__(self, test_reference: str, baseline_seconds: float = 1.0, settle_seconds: float = 1.0):
+    def __init__(self, test_reference: str, baseline_seconds: float = 1.0, settle_seconds: float = 1.0, *, sweep_rate=None):
         if test_reference not in AXIS_INFO:
             raise ValueError(f"Unknown static control reference: {test_reference}")
 
         self.reference = test_reference
         self.info = AXIS_INFO[test_reference]
         self.limit = float(self.info['limit'])
-        self.rate = float(self.info['rate'])
+        self.rate = self.info['rate'] if sweep_rate is None else validate_sweep_rate(sweep_rate)
         self.baseline_seconds = float(baseline_seconds)
         self.settle_seconds = float(settle_seconds)
 

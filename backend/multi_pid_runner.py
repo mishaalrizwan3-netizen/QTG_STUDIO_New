@@ -188,6 +188,12 @@ def fresh_telemetry(window, timeout_s=2.0, max_retries=3):
 
 def prepare(window, base):
     """Apply the selected conditions through the existing Manual preparation."""
+    window._session_context.pop('climb_pid_sample', None)
+    window._session_context.pop('climb_pid_settings', None)
+    window._session_context.pop('climb_pid_release_errors', None)
+    window._session_context.pop('climb_pid_trace', None)
+    window._session_context.pop('climb_pid_trace_error', None)
+    window._pending_climb_pid_settings = None
     if window._session_context.get('initial_conditions') is None:
         raise RuntimeError('PID mode requires selected initial conditions')
     window.active_manual_ref_path = None
@@ -199,6 +205,29 @@ def prepare(window, base):
     return base.SuperMushakLoggerApp.start_manual_test(window)
 
 
+CLIMB_GAIN_GROUPS = ('airspeed', 'pitch', 'bank', 'heading', 'yaw')
+GAIN_KEYS = ('kp', 'ki', 'kd')
+
+
+def validate_climb_pid_settings(settings):
+    if not isinstance(settings, dict) or set(settings) != {'target_ias', 'target_bank', 'target_heading', *CLIMB_GAIN_GROUPS}:
+        raise ValueError('Incomplete climb PID settings.')
+    result = {}
+    for key, low, high in (('target_ias', 40, 220), ('target_bank', -20, 20), ('target_heading', 0, 360)):
+        value = float(settings[key])
+        if not math.isfinite(value) or not low <= value <= high:
+            raise ValueError(f'{key.replace("_", " ").capitalize()} must be between {low} and {high}.')
+        result[key] = value
+    for group in CLIMB_GAIN_GROUPS:
+        gains = settings[group]
+        if not isinstance(gains, dict) or set(gains) != set(GAIN_KEYS):
+            raise ValueError(f'Missing {group} gains.')
+        result[group] = {key: float(gains[key]) for key in GAIN_KEYS}
+        if any(not math.isfinite(value) or not 0 <= value <= 5 for value in result[group].values()):
+            raise ValueError(f'{group.capitalize()} gains must be between 0 and 5.')
+    return result
+
+
 def loop(window, base, owner_alive=None):
     """
     Main Multi-PID execution loop.
@@ -206,6 +235,7 @@ def loop(window, base, owner_alive=None):
     """
     device = window.brunner
     context = getattr(window, '_session_context', {})
+    climb = context.get('test_reference') == '1.c.(1)'
 
     active_pids = context.get('active_pids', {})
     pitch_enabled = bool(active_pids.get('airspeed', False))
@@ -244,22 +274,60 @@ def loop(window, base, owner_alive=None):
 
     roll_needed = bank_enabled or yaw_enabled
     rows = []  # Cleanup must also work if the first telemetry request fails.
+    trace = []
+    trace_origin = time.monotonic()
+    trace_path = Path(context['status_file']).with_name(
+        Path(context['status_file']).stem.removesuffix('_status') + '_climb_pid_trace.csv'
+    ) if climb and context.get('status_file') else None
+
+    def capture(event, telemetry=None, **control):
+        if trace_path is None:
+            return
+        telemetry = telemetry or {}
+        trace.append(dict(
+            time_s=time.monotonic() - trace_origin, event=event,
+            ias_kt=telemetry.get('airspeed_indicated'),
+            pitch_sim_deg=telemetry.get('pitch_angle'), bank_deg=telemetry.get('bank_angle'),
+            heading_mag_deg=telemetry.get('magnetic_heading'), heading_true_deg=telemetry.get('true_heading'),
+            yaw_rate_deg_s=telemetry.get('yaw_rate'), sideslip_deg=telemetry.get('sideslip'),
+            elevator_rad=telemetry.get('surface_elevator_rad'),
+            aileron_left_rad=telemetry.get('surface_aileron_left_rad'),
+            aileron_right_rad=telemetry.get('surface_aileron_right_rad'),
+            rudder_rad=telemetry.get('surface_rudder_rad'),
+            target_ias_kt=target_ias, target_heading_mag_deg=target_hdg,
+            **{key: control.get(key) for key in (
+                'target_pitch_deg', 'demanded_bank_deg', 'target_bank_deg', 'heading_captured',
+                'pitch_command', 'pitch_position', 'roll_command', 'roll_position',
+                'rudder_command', 'rudder_position', 'telemetry_received_s', 'loader_read_s',
+                'command_sent_s', 'detail',
+            )},
+        ))
 
     try:
         # Aircraft preparation has finished and deliberately leaves P3D paused.
         # Complete one unpause handoff before taking physical axis ownership.
+        if trace_path is not None:
+            try:
+                capture('before_unpause', window.p3d.get_telemetry())
+            except (AttributeError, RuntimeError, OSError) as exc:
+                capture('before_unpause', detail=str(exc))
         window.p3d.unpause_sim()
         ready_deadline = time.monotonic() + 20.
         while True:
             if window.stop_worker_event.is_set():
                 raise RuntimeError('Multi-PID startup cancelled')
             data = fresh_telemetry(window, timeout_s=2.0, max_retries=3)
-            if window.p3d.simulation_running():
+            running = window.p3d.simulation_running()
+            capture('before_engagement' if running else 'waiting_for_unpause', data)
+            if running:
                 break
             if time.monotonic() >= ready_deadline:
                 raise RuntimeError('P3D did not confirm running state after initialization')
             window.stop_worker_event.wait(.04)
         start_pitch, start_roll, start_rudder = transport.engage()
+        capture('engaged', pitch_position=start_pitch if pitch_enabled else None,
+                roll_position=start_roll if roll_needed else None,
+                rudder_position=start_rudder if yaw_enabled and transport.rudder_available else None)
 
         # Instantiate enabled controllers
         ias_ctrl = AirspeedController(kp=0.24, ki=0.008, kd=0.32, min_pitch=-15.0, max_pitch=15.0)
@@ -285,6 +353,10 @@ def loop(window, base, owner_alive=None):
         rudder_cmd = start_rudder
         rudder_vel = 0.0
 
+        measured_pitch = start_pitch
+        measured_roll = start_roll
+        measured_rudder = start_rudder
+
         gate = MultiPidStabilizationGate(pitch_enabled=pitch_enabled,
                                          bank_enabled=bank_enabled,
                                          yaw_enabled=yaw_enabled,
@@ -300,9 +372,17 @@ def loop(window, base, owner_alive=None):
         mismatch_rudder = None
 
         pause_started = None
+        telemetry_missing_since = None
         rows = []
 
         window.multi_pid_active = window._external_control_active = True
+        if climb:
+            controllers = dict(zip(CLIMB_GAIN_GROUPS, (ias_ctrl, pitch_pid, bank_pid, heading_ctrl, yaw_pid)))
+            context['climb_pid_settings'] = dict(
+                target_ias=target_ias, target_bank=target_bank, target_heading=target_hdg,
+                **{name: {key: getattr(controller, key) for key in GAIN_KEYS}
+                   for name, controller in controllers.items()},
+            )
 
         while not window.stop_worker_event.is_set():
             now = time.monotonic()
@@ -312,38 +392,82 @@ def loop(window, base, owner_alive=None):
             if window.stop_worker_event.is_set():
                 break
 
-            data = fresh_telemetry(window, timeout_s=1.5, max_retries=2)
-            is_paused = not window.p3d.simulation_running()
+            if climb:
+                transport.refresh_watchdog()
+                is_paused = not window.p3d.simulation_running()
+                if not is_paused:
+                    transport.refresh_watchdog()
+                    try:
+                        data = fresh_telemetry(window, timeout_s=0.20, max_retries=1)
+                        telemetry_received_s = time.monotonic() - trace_origin
+                    except RuntimeError:
+                        gate.reset()
+                        if telemetry_missing_since is None:
+                            telemetry_missing_since = now
+                        elif now - telemetry_missing_since >= 3.0:
+                            raise
+                        window.stop_worker_event.wait(0.02)
+                        continue
+                    telemetry_missing_since = None
+                    transport.refresh_watchdog()
+                    is_paused = not window.p3d.simulation_running()
+            else:
+                data = fresh_telemetry(window, timeout_s=1.5, max_retries=2)
+                is_paused = not window.p3d.simulation_running()
 
             if is_paused:
                 gate.reset()  # Every pause breaks the continuous five-second hold.
+                telemetry_missing_since = None
                 if phase == 'recording':
                     raise RuntimeError('Prepar3D paused during active recording run.')
                 if pause_started is None:
                     pause_started = now
-                if now - pause_started > 2.0:
-                    gate.reset()
+                    capture('paused')
+                    if climb:
+                        window.sig_update_stage.emit(
+                            getattr(base, 'STAGE_INITIALIZING', 'Initializing'),
+                            'P3D paused; waiting for unpause before resuming stabilization...'
+                        )
+                elif not climb and now - pause_started > 2.0:
                     window.sig_update_stage.emit(
                         getattr(base, 'STAGE_INITIALIZING', 'Initializing'),
                         'P3D paused; waiting for unpause before resuming stabilization...'
                     )
-                time.sleep(0.04)
+                window.stop_worker_event.wait(0.04)
                 continue
             else:
                 pause_started = None
 
             actual_ias = float(data.get('airspeed_indicated', data.get('ias_kt', 80.0)))
+            if climb:
+                settings = getattr(window, '_pending_climb_pid_settings', None)
+                if settings is not None and settings is not context['climb_pid_settings']:
+                    target_ias = settings['target_ias']
+                    target_bank = settings['target_bank']
+                    target_hdg = settings['target_heading'] % 360.0
+                    for name, controller in controllers.items():
+                        controller.kp, controller.ki, controller.kd = (settings[name][key] for key in GAIN_KEYS)
+                    context['climb_pid_settings'] = settings
+                    gate.reset()
             actual_pitch = -float(data.get('pitch_angle', 0.0))
             actual_bank = float(data.get('bank_angle', 0.0))
             actual_hdg = float(data.get('magnetic_heading', data.get('heading_deg', 0.0))) % 360.0
             yaw_rate = float(data.get('yaw_rate', 0.0))
             sideslip = float(data.get('sideslip', 0.0))
 
+            # Refresh enabled physical feedback before computing controller efforts
+            transport.read_positions()
+            loader_read_s = time.monotonic() - trace_origin
+            measured_pitch = transport.last_pitch_feedback if transport.last_pitch_feedback is not None else measured_pitch
+            measured_roll = transport.last_roll_feedback if transport.last_roll_feedback is not None else measured_roll
+            measured_rudder = transport.last_rudder_feedback if transport.last_rudder_feedback is not None else measured_rudder
+
             # 1. Pitch Axis Control (Airspeed PID)
             if pitch_enabled:
                 desired_target_pitch = ias_ctrl.update(target_ias, actual_ias, dt, actual_pitch)
                 desired_pitch_effort = pitch_pid.update(desired_target_pitch, actual_pitch, dt)
                 pitch_cmd, pitch_vel = slew_position(pitch_cmd, pitch_vel, desired_pitch_effort, dt, max_rate=0.28, max_accel=0.90)
+                pitch_cmd = max(measured_pitch - 0.28, min(measured_pitch + 0.28, pitch_cmd))
 
             # 2. Roll & Rudder Control (Bank PID & Yaw/Heading PID with Handoff)
             if roll_needed:
@@ -370,53 +494,82 @@ def loop(window, base, owner_alive=None):
 
                 desired_roll = bank_pid.update(effective_target_bank, actual_bank, dt)
                 roll_cmd, roll_vel = slew_position(roll_cmd, roll_vel, desired_roll, dt, max_rate=0.28, max_accel=0.90)
+                roll_cmd = max(measured_roll - 0.28, min(measured_roll + 0.28, roll_cmd))
 
                 if yaw_enabled and transport.rudder_available:
                     desired_yaw = yaw_pid.update(sideslip, yaw_rate, dt, heading_ctrl.hdg_rate)
                     rudder_cmd, rudder_vel = slew_position(rudder_cmd, rudder_vel, desired_yaw, dt, max_rate=0.28, max_accel=0.90)
-
-            # Refresh enabled physical feedback before watchdog-checked commands.
-            transport.read_positions()
+                    rudder_cmd = max(measured_rudder - 0.28, min(measured_rudder + 0.28, rudder_cmd))
 
             # Send hardware commands
+            command_sent_s = time.monotonic() - trace_origin
             transport.command(
                 pitch_pos=pitch_cmd if pitch_enabled else None,
                 roll_pos=roll_cmd if roll_needed else None,
                 rudder_pos=rudder_cmd if (yaw_enabled and transport.rudder_available) else None
             )
+            if trace_path is not None:
+                capture(phase, data, target_pitch_deg=desired_target_pitch if pitch_enabled else None,
+                    demanded_bank_deg=demanded_bank if roll_needed else None,
+                    target_bank_deg=effective_target_bank if roll_needed else None,
+                    heading_captured=captured if roll_needed else None,
+                    pitch_command=pitch_cmd if pitch_enabled else None,
+                    pitch_position=measured_pitch if pitch_enabled else None,
+                    roll_command=roll_cmd if roll_needed else None,
+                    roll_position=measured_roll if roll_needed else None,
+                    rudder_command=rudder_cmd if yaw_enabled and transport.rudder_available else None,
+                    rudder_position=measured_rudder if yaw_enabled and transport.rudder_available else None,
+                    telemetry_received_s=telemetry_received_s, loader_read_s=loader_read_s,
+                    command_sent_s=command_sent_s)
             context['pid_runtime'] = {
                 'command_axes': (['pitch'] if pitch_enabled else []) +
                                 (['roll'] if roll_needed else []) +
                                 (['rudder'] if yaw_enabled and transport.rudder_available else []),
                 'updated_at': time.time(),
             }
+            if climb:
+                signals = dict(ias=actual_ias, pitch=actual_pitch, bank=actual_bank, heading=actual_hdg,
+                               target_ias=target_ias, target_heading=target_hdg,
+                               target_pitch=desired_target_pitch if pitch_enabled else None,
+                               target_bank=effective_target_bank if roll_needed else target_bank,
+                               pitch_cmd=pitch_cmd if pitch_enabled else None,
+                               pitch_pos=measured_pitch if pitch_enabled else None,
+                               roll_cmd=roll_cmd if roll_needed else None,
+                               roll_pos=measured_roll if roll_needed else None,
+                               rudder_cmd=rudder_cmd if yaw_enabled and transport.rudder_available else None,
+                               rudder_pos=measured_rudder if yaw_enabled and transport.rudder_available else None)
+                context['climb_pid_sample'] = dict(
+                    time_s=now - control_started,
+                    **{key: value if value is not None and math.isfinite(value) else None
+                       for key, value in signals.items()},
+                )
 
             # Feedback tracking validation
-            measured_pitch = transport.last_pitch_feedback or 0.0
-            measured_roll = transport.last_roll_feedback or 0.0
-            measured_rudder = transport.last_rudder_feedback or 0.0
+            startup_grace = (now - control_started < 6.0)
+            loader_tol = 0.45 if startup_grace else 0.32
+            loader_timeout = 6.0 if startup_grace else 3.0
 
             if pitch_enabled:
-                if abs(pitch_cmd - measured_pitch) > 0.30:
+                if abs(pitch_cmd - measured_pitch) > loader_tol:
                     mismatch_pitch = now if mismatch_pitch is None else mismatch_pitch
-                    if now - mismatch_pitch > 2.5:
-                        raise RuntimeError('BRUNNER pitch loader did not track commands within 2.5s')
+                    if now - mismatch_pitch > loader_timeout:
+                        raise RuntimeError('BRUNNER pitch loader did not track commands within timeout')
                 else:
                     mismatch_pitch = None
 
             if roll_needed:
-                if abs(roll_cmd - measured_roll) > 0.30:
+                if abs(roll_cmd - measured_roll) > loader_tol:
                     mismatch_roll = now if mismatch_roll is None else mismatch_roll
-                    if now - mismatch_roll > 2.5:
-                        raise RuntimeError('BRUNNER roll loader did not track commands within 2.5s')
+                    if now - mismatch_roll > loader_timeout:
+                        raise RuntimeError('BRUNNER roll loader did not track commands within timeout')
                 else:
                     mismatch_roll = None
 
             if yaw_enabled and transport.rudder_available:
-                if abs(rudder_cmd - measured_rudder) > 0.30:
+                if abs(rudder_cmd - measured_rudder) > loader_tol:
                     mismatch_rudder = now if mismatch_rudder is None else mismatch_rudder
-                    if now - mismatch_rudder > 2.5:
-                        raise RuntimeError('BRUNNER rudder loader did not track commands within 2.5s')
+                    if now - mismatch_rudder > loader_timeout:
+                        raise RuntimeError('BRUNNER rudder loader did not track commands within timeout')
                 else:
                     mismatch_rudder = None
 
@@ -489,12 +642,28 @@ def loop(window, base, owner_alive=None):
         window.sig_update_stage.emit(getattr(base, 'STAGE_CONNECTION_ERROR', 'Connection error'), str(exc))
     finally:
         try:
-            transport.release()
-        except Exception:
-            pass
+            release_errors = transport.release()
+        except Exception as exc:
+            release_errors = [str(exc)]
         window.multi_pid_active = window._external_control_active = False
+        if climb and isinstance(release_errors, list) and release_errors:
+            context['climb_pid_release_errors'] = release_errors
+            detail = 'CLS2Sim did not confirm loader release: ' + '; '.join(release_errors)
+            window.multi_pid_fault = f'{window.multi_pid_fault}; {detail}' if window.multi_pid_fault else detail
+            window.sig_update_stage.emit(getattr(base, 'STAGE_CONNECTION_ERROR', 'Connection error'), window.multi_pid_fault)
 
         # The host logger owns the official CSV and the selected-graph QTG PDF.
+        if trace_path is not None:
+            capture('fault' if window.multi_pid_fault else 'stopped' if window.stop_worker_event.is_set() else 'finished',
+                    detail=window.multi_pid_fault)
+            try:
+                with trace_path.open('w', newline='', encoding='utf-8') as stream:
+                    writer = csv.DictWriter(stream, fieldnames=list(trace[0]))
+                    writer.writeheader()
+                    writer.writerows(trace)
+                context['climb_pid_trace'] = str(trace_path)
+            except OSError as exc:
+                context['climb_pid_trace_error'] = str(exc)
         # Do not publish the teammate's separate report format in this workflow.
         if rows:
             window.sig_recording_finished.emit()

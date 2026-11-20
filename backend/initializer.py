@@ -10,6 +10,44 @@ from backend.verifier import validate_conditions
 from backend.registry import engine_test_policy
 
 
+def validate_body_acceleration(values):
+    if values is None:
+        return {}
+    if not isinstance(values, dict) or any(axis not in ('X', 'Y', 'Z') for axis in values):
+        raise ValueError('Invalid body acceleration axes')
+    result = {}
+    for axis, value in values.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f'Body {axis} acceleration must be a finite number') from None
+        if not math.isfinite(number):
+            raise ValueError(f'Body {axis} acceleration must be a finite number')
+        result[axis] = number
+    return result
+
+
+def apply_body_acceleration(sim, context):
+    overrides = validate_body_acceleration(context.get('initial_body_acceleration'))
+    if not overrides:
+        return
+    current = sim.get_telemetry() if len(overrides) < 3 else {}
+    vector = []
+    for axis in 'XYZ':
+        if axis in overrides:
+            vector.append(overrides[axis])
+            continue
+        try:
+            value = float(current['accel' + axis])
+        except (KeyError, TypeError, ValueError):
+            value = float('nan')
+        if not math.isfinite(value):
+            raise RuntimeError(f'Body {axis} acceleration is unavailable. Enter a value for that axis or clear the acceleration settings.')
+        vector.append(value)
+    if not sim.set_linear_body_acceleration(*vector):
+        raise RuntimeError('Prepar3D rejected the initial body acceleration.')
+
+
 def apply_manual_conditions(window,values):
     """Apply settings once while paused, then optionally verify Manual airflow."""
     from backend.airborne_preparation import enabled, prepare

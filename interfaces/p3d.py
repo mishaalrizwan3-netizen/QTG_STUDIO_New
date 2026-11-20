@@ -4,6 +4,7 @@ import ctypes
 import os
 import platform
 from pathlib import Path
+from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS, Measurements
 
 
 class QTG_P3D_State(ctypes.Structure):
@@ -39,6 +40,8 @@ class P3DClient:
         self.dll = None
         self.error = ""
         self.running = False
+        self._body_accel_reader = None
+        self._body_accel_unavailable = False
 
     def start(self) -> bool:
         if platform.system() != "Windows":
@@ -77,7 +80,27 @@ class P3DClient:
             return None
         return state
 
+    def body_acceleration(self):
+        """Read the optional graph channels for the dashboard recorder."""
+        frame = {}
+        if self.running and not self._body_accel_unavailable:
+            try:
+                if self._body_accel_reader is None:
+                    self._body_accel_reader = Measurements(
+                        self.dll_path.with_name("qtg_simconnect.dll"), channels=BODY_ACCELERATION_CHANNELS)
+                frame = self._body_accel_reader.poll() or {}
+            except (OSError, RuntimeError):
+                self._body_accel_unavailable = True
+                if self._body_accel_reader is not None:
+                    self._body_accel_reader.close()
+                    self._body_accel_reader = None
+        return tuple(frame.get(key, float("nan")) for key, _, _ in BODY_ACCELERATION_CHANNELS)
+
     def stop(self) -> None:
+        if self._body_accel_reader is not None:
+            self._body_accel_reader.close()
+            self._body_accel_reader = None
+        self._body_accel_unavailable = False
         if self.running and self.dll is not None:
             self.dll.QTG_BridgeStop()
         self.running = False

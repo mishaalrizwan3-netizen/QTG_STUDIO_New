@@ -1,5 +1,5 @@
 """
-Aeromix Multi-Crew FNTP II - Objective Validation Studio (Windows Edition).
+Aeromix Multi-Crew FNPT II - Objective Validation Studio (Windows Edition).
 EASA CS-FSTD(A) Issue 2 Objective Qualification & Validation Workspace.
 Includes Dashboard (Home Page), Yearly Results, MQTG Suite, Initial Tests,
 Execution Logs, 5px rounded borders, and light blue & white aerospace theme.
@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
+if __name__ == "__main__" and not __package__ and not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.modules["frontend.main"] = sys.modules[__name__]
 
 # Ensure Windows OS and Python DLL loaders locate internal modules and C-extensions
 # especially when running from removable USB drives (e.g. E:\, F:\)
@@ -45,7 +50,6 @@ import tkinter as tk
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog, filedialog
 
 try:
@@ -117,6 +121,12 @@ STALL_CHANNELS = [
     ("Stall warning (on/off)", "stall_warning"),
     ("Elevator surface position (rad)", "stall_elevator")]
 
+BODY_ACCELERATION_GRAPHS = [
+    ("Body X acceleration (ft/s²)", "body_accel_x"),
+    ("Body Y acceleration (ft/s²)", "body_accel_y"),
+    ("Body Z acceleration (ft/s²)", "body_accel_z"),
+]
+
 BUC_CHANNELS = [
     ('Cockpit throttle Z rotation (%)', 'buc_throttle'),
     ('Cockpit propeller slider (%)', 'buc_propeller'),
@@ -124,6 +134,8 @@ BUC_CHANNELS = [
     ('P3D engine torque (ft lb)', 'buc_torque'),
     ('P3D propeller lever (%)', 'buc_sim_propeller'),
     ('P3D mixture lever (%)', 'buc_sim_mixture')]
+
+ALL_GRAPH_CHANNELS = PDF_CHANNELS + STALL_CHANNELS + BODY_ACCELERATION_GRAPHS + BUC_CHANNELS
 
 CLIMB_DEFAULT_KEYS = {
     "ias_kt", "vertical_speed_fpm", "altitude_msl_ft",
@@ -137,7 +149,7 @@ ENGINE_ACCEL_DEFAULT_KEYS = {
     "ias_kt", "altitude_msl_ft", "height_agl_ft",
     "throttle_pct", "engine_rpm", "prop_rpm",
     "manifold_inhg", "fuel_flow_pph", "titt"
-}
+} | {key for _, key in BODY_ACCELERATION_GRAPHS}
 POWER_DYNAMICS_DEFAULT_KEYS = {
     'ias_kt', 'altitude_msl_ft', 'height_agl_ft', 'vertical_speed_fpm',
     'pitch_deg', 'bank_deg', 'heading_deg', 'throttle_pct',
@@ -147,7 +159,7 @@ ENGINE_DECEL_DEFAULT_KEYS = {
     "ground_speed_kt",
     "throttle_pct", "engine_rpm", "prop_rpm",
     "manifold_inhg", "fuel_flow_pph", "titt"
-}
+} | {key for _, key in BODY_ACCELERATION_GRAPHS}
 STATIC_PITCH_DEFAULT_KEYS = {"ias_kt", "pitch_position", "pitch_force"}
 STATIC_ROLL_DEFAULT_KEYS = {"ias_kt", "roll_position", "roll_force"}
 STATIC_YAW_DEFAULT_KEYS = {"ias_kt", "rudder_position", "rudder_force"}
@@ -197,7 +209,7 @@ def read_graph_csv(path):
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         rows = list(csv.DictReader(stream))
     channels = {}
-    for key in ["time_s"] + [key for _, key in PDF_CHANNELS + STALL_CHANNELS + BUC_CHANNELS if key != "titt"]:
+    for key in ["time_s"] + [key for _, key in ALL_GRAPH_CHANNELS if key != "titt"]:
         names = [key] + ALIASES.get(key, []) + extra.get(key, [])
         if key in ("pitch_position", "roll_position", "rudder_position"):
             names = [name for name in names if "norm" not in name.lower()]
@@ -318,11 +330,12 @@ SMK_ENGINE_SOURCE_DIR = _found_script.parent if _found_script else SMK_ENGINE_DI
 SMK_ENGINE_SCRIPT = _found_script or (BASE / "SMK_Engine_From_Climb.py")
 
 # ============================= SECTION 1: TEST CATALOG (30 TESTS) ============================
-from backend.catalog import TestSpec, TESTS
+from backend.catalog import CLIMB_STALL_REFERENCE, TestSpec, TESTS
 
 for spec in TESTS:
     def_keys = default_channels_for_spec(spec.reference)
-    spec.pdf_graphs = [(label, col) for label, col in (PDF_CHANNELS + (STALL_CHANNELS if spec.reference == '2.c.(8b)' else []) + (BUC_CHANNELS if spec.reference == '2.a.(8)' else [])) if col in def_keys]
+    channels = ALL_GRAPH_CHANNELS
+    spec.pdf_graphs = [(label, col) for label, col in channels if col in def_keys]
 
 
 # ======================== SECTION 2: C++ SIMCONNECT BRIDGE WRAPPER ====================
@@ -419,6 +432,16 @@ def format_active_pid_status(state):
             messages.append(f'{name}: waiting for controller command')
             continue
         actual = number(telemetry.get(measurement))
+        # Fallback to alternative telemetry key names (e.g. climb PID uses
+        # 'airspeed_indicated' instead of 'ias_kt', 'bank_angle' vs 'bank_deg', etc.)
+        if actual is None:
+            aliases = {'ias_kt': ('airspeed_indicated', 'indicated_airspeed'),
+                       'bank_deg': ('bank_angle',),
+                       'heading_deg': ('true_heading', 'magnetic_heading')}
+            for alt in aliases.get(measurement, ()):
+                actual = number(telemetry.get(alt))
+                if actual is not None:
+                    break
         target = number(targets.get(target_key, initial.get(initial_key)))
         if actual is None or target is None:
             messages.append(f'{name}: waiting for measurements')
@@ -919,6 +942,10 @@ def generate_test_pdf(spec: TestSpec, test_mode: str, recorded_samples: list = N
                 "fuel_flow_pph": fuel_f,
                 "ground_speed_kt": ias
             })
+            if recorded_samples and len(recorded_samples) == len(df):
+                from interfaces.engine_measurements import BODY_ACCELERATION_CHANNELS
+                for index, (_, simvar, _) in enumerate(BODY_ACCELERATION_CHANNELS, start=11):
+                    df[simvar] = [row[index] if len(row) > index else float("nan") for row in recorded_samples]
             df.to_csv(csv_path, index=False)
 
             # Render exactly using engine_report_v2 and plot_graphs
@@ -974,7 +1001,7 @@ def generate_test_pdf(spec: TestSpec, test_mode: str, recorded_samples: list = N
         fig = plt.figure(figsize=(8.5, 11))
 
         # Title & Subtitle
-        fig.text(0.08, 0.94, "Aeromix Multi-Crew FNTP II", fontsize=18, fontweight="bold", color="#0F172A")
+        fig.text(0.08, 0.94, "Aeromix Multi-Crew FNPT II", fontsize=18, fontweight="bold", color="#0F172A")
         fig.text(0.08, 0.915, "EASA CS-FSTD(A) Issue 2 — Objective Validation Test Report", fontsize=11, fontweight="bold", color="#2563EB")
         fig.text(0.08, 0.895, "Qualification Standard: FNPT II (Multi-Crew) | AMC1 FSTD(A).300(b)(3)", fontsize=9, color="#64748B")
 
@@ -1024,7 +1051,7 @@ def generate_test_pdf(spec: TestSpec, test_mode: str, recorded_samples: list = N
         ax_note.text(0, 0.75, "\n".join(label for label, _ in selected) or "None (summary only)", fontsize=9, va="top")
         # Footer notes
         fig.text(0.08, 0.09, f"Test Duration: {duration_s:.1f} s  |  Samples Logged: {sample_count}  |  Compliance: NOT ASSESSED", fontsize=8.5, fontweight="bold", color="#0F172A")
-        fig.text(0.08, 0.065, "Generated automatically by Aeromix Multi-Crew FNTP II Studio.", fontsize=7.5, style="italic", color="#64748B")
+        fig.text(0.08, 0.065, "Generated automatically by Aeromix Multi-Crew FNPT II Studio.", fontsize=7.5, style="italic", color="#64748B")
 
         pdf.savefig(fig)
         plt.close(fig)
@@ -1033,7 +1060,8 @@ def generate_test_pdf(spec: TestSpec, test_mode: str, recorded_samples: list = N
                         "throttle_pct" if engine else "pitch_deg": 3,
                         "engine_rpm" if engine else "bank_deg": 4,
                         "prop_rpm": 5, "pitch_deg": 6, "bank_deg": 7,
-                        "elevator_input_norm": 8, "aileron_input_norm": 9, "rudder_input_norm": 10}
+                        "elevator_input_norm": 8, "aileron_input_norm": 9, "rudder_input_norm": 10,
+                        "body_accel_x": 11, "body_accel_y": 12, "body_accel_z": 13}
         data = getattr(spec, "graph_csv_data", None)
         for label, channel in selected:
             if channel == "titt" and getattr(spec, "graph_csv_path", ""):
@@ -1077,7 +1105,7 @@ class App(tk.Tk):
         super().__init__()
         from frontend.mousewheel import install
         self._register_scroll_area = install(self)
-        self.title("Aeromix Multi-Crew FNTP II")
+        self.title("Aeromix Multi-Crew FNPT II")
         screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"{min(1390, max(1080, screen_w - 55))}x{min(880, max(700, screen_h - 90))}")
         self.minsize(1040, 680)
@@ -1247,7 +1275,7 @@ class App(tk.Tk):
 
         stack = tk.Frame(header, bg=COL["rail"])
         stack.pack(side="left", pady=20)
-        self._label(stack, "Aeromix Multi-Crew FNTP II", 16, COL["header_text"], "bold", anchor="w").pack(anchor="w")
+        self._label(stack, "Aeromix Multi-Crew FNPT II", 16, COL["header_text"], "bold", anchor="w").pack(anchor="w")
 
         # Right Connection Buttons
         right = tk.Frame(header, bg=COL["rail"])
@@ -1309,7 +1337,7 @@ class App(tk.Tk):
         # Welcome / Banner
         banner = tk.Frame(dash_content, bg=COL["bg"])
         banner.pack(fill="x", padx=28, pady=(20, 14))
-        self._label(banner, "Aeromix Multi-Crew FNTP II — Qualification Dashboard", 17, COL["text"], "bold").pack(anchor="w")
+        self._label(banner, "Aeromix Multi-Crew FNPT II — Qualification Dashboard", 17, COL["text"], "bold").pack(anchor="w")
         self._label(banner, "EASA CS-FSTD(A) Issue 2 Objective Qualification & Yearly Recurrent Evaluation", 10, COL["dim"]).pack(anchor="w", pady=(2, 0))
 
         # Top 3 Action Cards Grid
@@ -1915,7 +1943,8 @@ class App(tk.Tk):
         self._label(self.workspace, spec.title, 20, COL["text"], "bold",
                     anchor="w", justify="left", wraplength=880).pack(anchor="w", fill="x", pady=(4, 2))
         self._label(self.workspace,
-                    f"EASA test reference  {spec.reference}     |     PDF page {spec.page}     |     AMC1 FSTD(A).300(b)(3)",
+                    (f"Internal test {spec.reference} | Procedure pending" if spec.reference == CLIMB_STALL_REFERENCE
+                     else f"EASA test reference  {spec.reference}     |     PDF page {spec.page}     |     AMC1 FSTD(A).300(b)(3)"),
                     10, COL["muted"], anchor="w").pack(fill="x", pady=(0, 14))
 
         # --- Test Specifications Block (5px rounded border) ---
@@ -1999,8 +2028,10 @@ class App(tk.Tk):
         )
         if spec.reference != '2.a.(8)':
             self.btn_subtab_auto.pack(side="left")
-        if spec.reference == '1.c.(2)':
-            for button in (self.btn_subtab_manual, self.btn_subtab_auto):
+        if spec.reference in ('1.c.(2)', CLIMB_STALL_REFERENCE):
+            disabled_buttons = (self.btn_subtab_auto,) if spec.reference == CLIMB_STALL_REFERENCE else (
+                self.btn_subtab_manual, self.btn_subtab_auto)
+            for button in disabled_buttons:
                 button.command = None
                 button.configure(cursor='arrow')
                 button.configure_button(bg='#E2E8F0',fg='#64748B',hover_bg='#E2E8F0',hover_fg='#64748B')
@@ -2038,6 +2069,8 @@ class App(tk.Tk):
         self.common_pid_status.pack(fill="x",pady=(0,12))
         if spec.reference == '1.c.(2)':
             self.common_status.configure(text='Settings review only: this multi-engine test is not executable in the current single-engine application.',fg=COL['amber'])
+        if spec.reference == CLIMB_STALL_REFERENCE:
+            self.common_status.configure(text='Manual recording is available. Automatic Climb Stall is pending a test procedure.', fg=COL['amber'])
         grid=tk.Frame(box,bg="#FFFFFF")
         grid.pack(fill="x")
         grid.grid_columnconfigure((0,1),weight=1,uniform="live")
@@ -2252,7 +2285,7 @@ class App(tk.Tk):
         mapping={"throttle":"throttle_text","engine":"engine_text","flight":"flight_text","attitude":"attitude_text",
                  "controls":"controls_text","recording":"recording_text","progress":"progress_text"}
         connection_text = f"Sim Flight Model {'Connected' if state.get('connected') else 'Disconnected'}"
-        connection_text += ' | P3D throttle control' if state.get('control_method') in ('engine_step', 'power_dynamics') else f" | CLS2sim Connection: {'Connected' if state.get('brunner_connected') else 'Disconnected'}"
+        connection_text += ' | P3D throttle control' if state.get('control_method') in ('engine_step', 'power_dynamics') else f" | CLS2sim Connection: {'Connected' if (state.get('brunner_connected') or self.cls2sim_connected) else 'Disconnected'}"
         self._common_view_vars["connection"].set(connection_text)
         for key,field in mapping.items(): self._common_view_vars[key].set((state.get(field) or "N/A").replace("Prepar3D","Sim Flight Model").replace("P3D","Sim Flight Model").replace("BRUNNER","CLS2sim").replace("Brunner","CLS2sim"))
         telemetry=state.get("telemetry") or {}
@@ -2304,6 +2337,9 @@ class App(tk.Tk):
     def _launch_common_test(self, mode, spec, force_initialize=False, control_method=None):
         import os
         try:
+            if spec.reference == CLIMB_STALL_REFERENCE and mode == 'auto':
+                self.common_status.configure(text='Automatic Climb Stall is pending a test procedure.', fg=COL['amber'])
+                return
             if spec.reference == '2.a.(8)' and mode != 'manual':
                 self.common_status.configure(text='Throttle lever alignment is a Manual test.', fg=COL['amber'])
                 return
@@ -2323,11 +2359,18 @@ class App(tk.Tk):
                     self.common_status.configure(text='Manual selected. Review conditions, then click Initialize Aircraft.',fg=COL['blue'])
                     return
             from qtg_common_engine import launch,validate_duration,validate_reference
+            from backend.initial_condition_settings import BODY_ACCELERATION_FIELDS, body_acceleration_overrides
             duration=validate_duration(self._common_duration_var.get())
             if control_method not in (None,"pid","multi_pid","replay","engine_step","static_control","pitch_trim","stall","power_dynamics"):raise ValueError("Unknown automatic control method")
             fields, _ = self._test_settings[spec.reference]
-            missing_fields = any(not var.get().strip() for var in fields.values())
-            pid_axes = getattr(self, '_pid_axis_checks', {}).get(spec.reference, {})
+            missing_fields = any(not var.get().strip() for key, var in fields.items()
+                                 if key not in BODY_ACCELERATION_FIELDS)
+            if not hasattr(self, '_pid_axis_checks'):
+                self._pid_axis_checks = {}
+            if spec.reference not in self._pid_axis_checks:
+                self._pid_axis_checks[spec.reference] = {
+                    key: tk.BooleanVar(value=False) for key in ('airspeed', 'bank', 'yaw')}
+            pid_axes = self._pid_axis_checks.get(spec.reference, {})
             selected_axes = {key: bool(var.get()) for key, var in pid_axes.items()}
             pid_requested = mode == 'auto' and any(selected_axes.values())
             reference_only = (mode == 'auto' and not pid_requested and spec.reference not in ('1.c.(1)', '1.f.(1)', '1.f.(2)') and missing_fields)
@@ -2340,15 +2383,19 @@ class App(tk.Tk):
             stall_automatic = mode == 'auto' and spec.reference == '2.c.(8b)' and not reference_only
             power_dynamics_automatic = mode == 'auto' and spec.reference in ('2.c.(1)', '2.b.(11)') and not reference_only
             if mode == "auto" and spec.reference == "1.c.(1)" and control_method is None:
-
-                selected_method = self._automatic_methods[spec.reference].get()
-
-                if selected_method == "PID Automatic":
+                num_pids = sum(1 for v in selected_axes.values() if v)
+                if num_pids >= 2 or selected_axes.get('bank') or selected_axes.get('yaw'):
+                    method = "multi_pid"
+                elif selected_axes.get('airspeed'):
                     method = "pid"
-                elif selected_method == "Recorded Replay":
-                    method = "replay"
                 else:
-                    raise ValueError("Unknown Automatic Control Method selection")
+                    selected_method = self._automatic_methods[spec.reference].get()
+                    if selected_method in ("PID Automatic", "Airspeed PID"):
+                        method = "pid"
+                    elif selected_method == "Recorded Replay":
+                        method = "replay"
+                    else:
+                        raise ValueError("Unknown Automatic Control Method selection")
 
             elif engine_automatic:
                 method = 'engine_step'
@@ -2360,10 +2407,7 @@ class App(tk.Tk):
                 method = 'stall'
             elif power_dynamics_automatic:
                 method = 'power_dynamics'
-            elif pid_requested and control_method is None:
-                method = 'multi_pid'
             else:
-
                 method = control_method or "replay"
 
             if engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic:
@@ -2417,7 +2461,7 @@ class App(tk.Tk):
             selected = [key for _, key in spec.pdf_graphs]
             conditions = None
             validation = None
-            if method == "pid":
+            if method == "pid" or (method == "multi_pid" and spec.reference == "1.c.(1)"):
                 fields, _ = self._test_settings[spec.reference]
                 from qtg_climb_pid import options
                 try:
@@ -2470,7 +2514,7 @@ class App(tk.Tk):
                     'target_heading': target_hdg_val,
                 }
             from backend.engine_initialization_adapter import requested
-            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic or method == "multi_pid") and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
+            universal = not (engine_automatic or static_control_automatic or trim_automatic or stall_automatic or power_dynamics_automatic or method in ("pid", "multi_pid")) and requested(dict(test_reference=spec.reference, mode=mode, control_method=method))
             reference=self._common_reference_var.get().strip() if mode=="auto" and (method=="replay" or universal) else None
             if mode=="auto" and (method=="replay" or universal):
                 if not reference:
@@ -2479,6 +2523,15 @@ class App(tk.Tk):
                 reference=validate_reference(reference)
             guarded = universal
             binding_options = {}
+            acceleration = body_acceleration_overrides({key: var.get() for key, var in fields.items()})
+            if acceleration:
+                binding_options['initial_body_acceleration'] = acceleration
+            if static_control_automatic:
+                from backend.control_profile import validate_motor_speed, validate_sweep_rate
+                speeds = getattr(self, '_static_control_speed_vars', {}).get(spec.reference)
+                if speeds is not None:
+                    binding_options['static_sweep_rate'] = validate_sweep_rate(speeds[0].get())
+                    binding_options['static_motor_speed'] = validate_motor_speed(speeds[1].get())
             if method == "multi_pid" or pid_requested:
                 binding_options['active_pids'] = selected_axes
                 binding_options['target_heading_mag'] = conditions.get('target_heading', initial['heading_deg'] if initial else 0.0) if conditions else (initial['heading_deg'] if initial else 0.0)
@@ -2579,6 +2632,19 @@ class App(tk.Tk):
         finally:
             self._universal_initialize_requested = False
 
+    def _open_climb_pid_view(self, spec):
+        from frontend.climb_pid_view import ClimbPidView
+        view = getattr(self, '_climb_pid_view', None)
+        if view is None or not view.window.winfo_exists():
+            self._pid_axis_checks = getattr(self, '_pid_axis_checks', {})
+            checks = self._pid_axis_checks.setdefault(
+                spec.reference, {key: tk.BooleanVar(value=False) for key in ('airspeed', 'bank', 'yaw')})
+            view = self._climb_pid_view = ClimbPidView(
+                self, checks, (self._pid_targets[spec.reference], self._pid_targets_bank[spec.reference],
+                               self._pid_targets_heading[spec.reference]), self._common_command)
+        view.window.lift()
+        view.update(getattr(self, '_common_last_state', {}))
+
     def _open_pid_monitor(self):
         from qtg_pid_monitor import PidMonitor
         monitor=getattr(self,"_pid_monitor",None)
@@ -2646,6 +2712,9 @@ class App(tk.Tk):
                 self._manual_gui_bindings.pop(state['test_reference'], None)
             monitor=getattr(self,"_pid_monitor",None)
             if monitor is not None and monitor.window.winfo_exists(): monitor.update(state)
+            view = getattr(self, '_climb_pid_view', None)
+            if view is not None and view.window.winfo_exists():
+                view.update(state)
             if state.get("connected"):
                 if not self.flight_model_connected:
                     self.flight_model_connected = True
@@ -3481,9 +3550,18 @@ class App(tk.Tk):
         self._build_settings_panel(spec)
 
     def _ensure_test_settings(self, spec):
+        from backend.control_profile import AXIS_INFO
         if not hasattr(self, "_test_settings"):
             self._test_settings = {}
         if spec.reference not in self._test_settings:
+            if spec.reference in AXIS_INFO:
+                if not hasattr(self, '_static_control_speed_vars'):
+                    self._static_control_speed_vars = {}
+                axis = AXIS_INFO[spec.reference]
+                self._static_control_speed_vars[spec.reference] = (
+                    App._preference_var(self, spec.reference, 'static_sweep_rate', f"{axis['rate']:.2f}"),
+                    App._preference_var(self, spec.reference, 'static_motor_speed', str(axis['motor_speed'])),
+                )
             throttle_def = "5" if spec.reference == "1.f.(1)" else ("100" if spec.reference in ("1.f.(2)", "1.c.(1)") else "0")
             flt_def = "Approach or Landing" if spec.reference == "1.f.(1)" else ("Ground" if spec.reference == "1.f.(2)" else "Clean")
             alt_def = "755" if spec.reference == "1.f.(2)" else ("3000" if spec.reference == "1.c.(1)" else "2000")
@@ -3510,27 +3588,20 @@ class App(tk.Tk):
                         key, value = part.split(":", 1)
                         if key.strip() in defaults:
                             defaults[key.strip()] = value.strip()
+            from backend.initial_condition_settings import BODY_ACCELERATION_FIELDS, SETTINGS_FIELDS, load
+            defaults.update(dict.fromkeys(BODY_ACCELERATION_FIELDS, ''))
             if not hasattr(self, "_test_defaults"):
                 self._test_defaults = {}
             self._test_defaults[spec.reference] = dict(defaults)
-            from backend.initial_condition_settings import load, load_visible_fields, FIELDS
             if not hasattr(self, '_visible_condition_fields'):
                 self._visible_condition_fields = {}
+            self._visible_condition_fields[spec.reference] = list(SETTINGS_FIELDS)
             try:
                 defaults.update(load(RESULTS_ROOT / 'initial_condition_settings', spec.reference))
-                self._visible_condition_fields[spec.reference] = load_visible_fields(
-                    RESULTS_ROOT / 'initial_condition_settings', spec.reference)
             except (OSError, ValueError) as exc:
                 parent_opt = {"parent": self} if hasattr(self, "tk") else {}
                 messagebox.showerror('Saved initial conditions', str(exc), **parent_opt)
-                self._visible_condition_fields[spec.reference] = list(FIELDS)
-            trim_keys = {"trim_position_rad", "trim_indicator", "trim_value_pct", "trim_elevator_surface_rad"}
-            channels = (PDF_CHANNELS if spec.reference in ('2.a.(7)', '2.a.(4)') else
-                        [(label, key) for label, key in PDF_CHANNELS if key not in trim_keys])
-            if spec.reference == '2.c.(8b)':
-                channels = channels + STALL_CHANNELS
-            if spec.reference == '2.a.(8)':
-                channels = channels + BUC_CHANNELS
+            channels = ALL_GRAPH_CHANNELS
             def_keys = default_channels_for_spec(spec.reference)
             from backend.pdf_graph_settings import load as load_pdf_settings
             try:
@@ -3610,7 +3681,7 @@ class App(tk.Tk):
         self._label(box,"Automatic Control Method",10,COL["text"],"bold").pack(anchor="w",pady=(4,2))
         methods = (
             ["P3D Throttle Step"] if spec.reference in ('1.f.(1)', '1.f.(2)')
-            else (["Pitch Trim Buttons"] if spec.reference in ('2.a.(7)', '2.a.(4)')
+            else (["Pitch Trim Step"] if spec.reference in ('2.a.(7)', '2.a.(4)')
             else (["Power Dynamics Step"] if spec.reference in ('2.c.(1)', '2.b.(11)')
             else (["Recorded Replay", "PID Automatic"] if spec.reference == "1.c.(1)" else ["Recorded Replay"])))
         )
@@ -3621,13 +3692,19 @@ class App(tk.Tk):
             self._automatic_methods[spec.reference].set('P3D Throttle Step')
             self._label(box, 'Automatic initializes from Test Settings. Acceleration uses 5% idle to 100% throttle; Deceleration uses 100% to 5% idle. Click Start Recording when READY TO RECORD. Records 5 seconds, steps the P3D throttle, then stops after 3 seconds at target RPM. No Manual reference is required. Deceleration requires parking brake ON before full throttle.', 8, COL['dim'], wraplength=235, justify='left').pack(fill='x', pady=4)
         if spec.reference in ('2.a.(7)', '2.a.(4)'):
-            self._automatic_methods[spec.reference].set('Pitch Trim Buttons')
+            self._automatic_methods[spec.reference].set('Pitch Trim Step')
         if spec.reference in ('2.c.(1)', '2.b.(11)'):
             self._automatic_methods[spec.reference].set('Power Dynamics Step')
         method_combo=ttk.Combobox(box,textvariable=self._automatic_methods[spec.reference],values=methods,
                      state="readonly" if unlocked else "disabled")
         method_combo.pack(fill="x")
         method_combo.bind("<<ComboboxSelected>>",lambda event:self._sync_common_duration(spec))
+        speeds = getattr(self, '_static_control_speed_vars', {}).get(spec.reference)
+        if speeds is not None:
+            self._label(box, 'Automatic control movement', 10, COL['text'], 'bold').pack(anchor='w', pady=(9, 2))
+            for label, variable in zip(('Sweep speed [normalized units/s]', 'CLS2Sim motor speed'), speeds):
+                self._label(box, label, 9, COL['dim']).pack(anchor='w', pady=(5, 2))
+                ttk.Entry(box, textvariable=variable, state='normal' if unlocked else 'disabled').pack(fill='x')
         if not hasattr(self, '_pid_axis_checks'):
             self._pid_axis_checks = {}
         if not hasattr(self, '_pid_targets'):
@@ -3664,8 +3741,12 @@ class App(tk.Tk):
             ttk.Entry(t_row, textvariable=target_var, width=8,
                       state="normal" if unlocked else "disabled").pack(side='right')
 
-        ttk.Button(box, text='Open full PID GUI',
-                   command=self._open_pid_monitor).pack(fill='x', pady=(6, 8))
+        if spec.reference == '1.c.(1)':
+            ttk.Button(box, text='Show all three PIDs',
+                       command=lambda: self._open_climb_pid_view(spec)).pack(fill='x', pady=(0, 8))
+        else:
+            ttk.Button(box, text='Open full PID GUI',
+                       command=self._open_pid_monitor).pack(fill='x', pady=(6, 8))
 
         if spec.reference=="1.c.(1)":
             if not hasattr(self,"_pid_validation"): self._pid_validation={}
@@ -3684,39 +3765,8 @@ class App(tk.Tk):
                 continue
             self._label(box, key, 9, COL["dim"]).pack(anchor="w", pady=(7, 2))
             ttk.Entry(box, textvariable=var, state="normal" if unlocked else "disabled").pack(fill="x")
-        condition_choice = tk.StringVar()
-        ttk.Combobox(box, textvariable=condition_choice, values=list(fields), state='readonly').pack(fill='x', pady=(8, 2))
-        condition_buttons = tk.Frame(box, bg='#FFFFFF')
-        condition_buttons.pack(fill='x')
-        def change_condition(add):
-            key = condition_choice.get()
-            if key not in fields or (key in visible_fields) == add:
-                return
-            previous = fields[key].get()
-            if add:
-                visible_fields.append(key)
-            else:
-                visible_fields.remove(key)
-                fields[key].set('')
-            try:
-                from backend.initial_condition_settings import save
-                save(RESULTS_ROOT / 'initial_condition_settings', spec.reference,
-                     {name: var.get().strip() for name, var in fields.items()}, visible_fields=visible_fields)
-            except (OSError, ValueError) as exc:
-                if add:
-                    visible_fields.remove(key)
-                else:
-                    visible_fields.append(key)
-                    fields[key].set(previous)
-                messagebox.showerror('Initial conditions not saved', str(exc), parent=self)
-                return
-            if TESTS[self.current_idx].reference == spec.reference:
-                self._refresh_condition_summary()
-            self._build_settings_panel(spec)
-        ttk.Button(condition_buttons, text='Add condition', command=lambda: change_condition(True)).pack(side='left')
-        ttk.Button(condition_buttons, text='Remove condition', command=lambda: change_condition(False)).pack(side='left', padx=4)
-        self._label(box, 'Removed conditions are unset; Manual initialization requires its necessary values.', 8,
-                    COL['dim'], wraplength=235, justify='left').pack(fill='x', pady=4)
+        self._label(box, "Body acceleration is applied once at initialization. Blank axes use the simulator’s current values.",
+                    8, COL["dim"], wraplength=235, justify="left").pack(fill="x", pady=(6, 0))
         ttk.Button(box, text='Save initial conditions',
                    command=lambda: self._save_test_initial_conditions(spec),
                    state='normal' if unlocked else 'disabled').pack(fill='x', pady=(8, 0))
@@ -3762,15 +3812,6 @@ class App(tk.Tk):
                                 state="normal" if unlocked else "disabled", wraplength=225, justify="left",
                                 command=_sync_graph_selection)
             cb.pack(fill="x")
-        graph_choice = tk.StringVar()
-        labels = {label: variable for label, _, variable in graphs}
-        ttk.Combobox(box, textvariable=graph_choice, values=list(labels), state='readonly').pack(fill='x', pady=(8, 2))
-        graph_buttons = tk.Frame(box, bg='#FFFFFF')
-        graph_buttons.pack(fill='x')
-        ttk.Button(graph_buttons, text='Add graph', command=lambda: labels[graph_choice.get()].set(True)
-                   if graph_choice.get() in labels else None).pack(side='left')
-        ttk.Button(graph_buttons, text='Remove graph', command=lambda: labels[graph_choice.get()].set(False)
-                   if graph_choice.get() in labels else None).pack(side='left', padx=4)
         if not hasattr(self, "_graph_csv_paths"):
             self._graph_csv_paths = {}
         source = self._graph_csv_paths.setdefault(spec.reference, tk.StringVar())
@@ -3812,7 +3853,7 @@ class App(tk.Tk):
             for key, var in fields.items():
                 if not var.get().strip() and key in getattr(self, '_visible_condition_fields', {}).get(spec.reference, fields):
                     var.set(self._test_defaults[spec.reference][key])
-            from backend.initial_condition_settings import validate
+            from backend.initial_condition_settings import BODY_ACCELERATION_FIELDS, validate
             validate({key: var.get().strip() for key, var in fields.items()}, require_complete=not allow_incomplete)
             for key in ("Alt[ft]", "IAS[kts]", "Flaps", "Latitude[deg]", "Longitude[deg]", "Heading[deg]", "Pitch[deg]", "Bank[deg]", "Throttle[%]", "Temperature[C]"):
                 if allow_incomplete and not fields[key].get().strip():
@@ -3835,7 +3876,10 @@ class App(tk.Tk):
             source = self._graph_csv_paths[spec.reference].get().strip()
             spec.graph_csv_data = read_graph_csv(source) if source else None
             spec.graph_csv_path = source
-            spec.initial_conditions = " | ".join(f"{key}: {var.get().strip()}" for key, var in fields.items())
+            spec.initial_conditions = " | ".join(
+                f"{key}: {var.get().strip()}" for key, var in fields.items()
+                if key not in BODY_ACCELERATION_FIELDS or var.get().strip()
+            )
             spec.pdf_graphs = [(label, column) for label, column, var in graphs if var.get()]
             return True
         except (ValueError, OSError) as exc:
@@ -3937,7 +3981,7 @@ class App(tk.Tk):
                         self._cls_proc_running = any(p.name().lower() == "cls2sim.exe" for p in psutil.process_iter(['name']))
                     except Exception:
                         self._cls_proc_running = False
-                cls_is_connected = getattr(self, "_cls_proc_running", False)
+                cls_is_connected = getattr(self, "_cls_proc_running", False) or self.cls2sim_connected
 
             if cls_is_connected != self.cls2sim_connected:
                 self.cls2sim_connected = cls_is_connected
@@ -3950,6 +3994,7 @@ class App(tk.Tk):
                         now = time.time()
                         elapsed = now - self.recording_start_time
                         rec_spec = getattr(self, "recording_spec", None)
+                        body_acceleration = self.p3d.body_acceleration()
 
                         # Engine tests: capture throttle + RPM channels
                         if rec_spec is not None and rec_spec.reference in ("1.f.(1)", "1.f.(2)"):
@@ -3960,7 +4005,8 @@ class App(tk.Tk):
                                 sample.throttle_percent,   # col[3] = throttle %
                                 sample.engine_rpm,         # col[4] = engine RPM
                                 sample.prop_rpm, sample.pitch_deg, sample.bank_deg,
-                                sample.elevator_position, sample.aileron_position, sample.rudder_position
+                                sample.elevator_position, sample.aileron_position, sample.rudder_position,
+                                *body_acceleration,
                             ))
                         else:
                             # All other tests: capture pitch + bank (aerodynamic response)
@@ -3971,7 +4017,8 @@ class App(tk.Tk):
                                 sample.pitch_deg,
                                 sample.bank_deg,
                                 sample.prop_rpm, sample.pitch_deg, sample.bank_deg,
-                                sample.elevator_position, sample.aileron_position, sample.rudder_position
+                                sample.elevator_position, sample.aileron_position, sample.rudder_position,
+                                *body_acceleration,
                             ))
 
                         n = len(self.recorded_samples)
@@ -4138,7 +4185,7 @@ def cli():
         from SMK_Engine_From_Climb import main as engine_main
         engine_main()
     elif "--check" in sys.argv:
-        print(f"Aeromix Multi-Crew FNTP II: {len(TESTS)} configured FNPT II objective validation tests")
+        print(f"Aeromix Multi-Crew FNPT II: {len(TESTS)} configured FNPT II objective validation tests")
         print(f"GUI file: {Path(__file__).resolve()}")
         print(f"SimConnect header: {(BASE / 'p3d_sdk' / 'SimConnect.h').exists()}")
         print(f"SimConnect lib: {(BASE / 'p3d_sdk' / 'SimConnect.lib').exists()}")

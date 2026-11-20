@@ -33,6 +33,25 @@ CHANNELS = (
     ('height_agl_ft', 'PLANE ALT ABOVE GROUND', 'feet'),
 )
 
+BODY_ACCELERATION_CHANNELS = (
+    ('body_accel_x', 'ACCELERATION BODY X', 'feet per second squared'),
+    ('body_accel_y', 'ACCELERATION BODY Y', 'feet per second squared'),
+    ('body_accel_z', 'ACCELERATION BODY Z', 'feet per second squared'),
+)
+
+
+def body_acceleration_fields(telemetry):
+    """Map correlated or BRUNNER bridge telemetry to CSV fields in ft/s²."""
+    fields = {}
+    for key, simvar, _ in BODY_ACCELERATION_CHANNELS:
+        raw = telemetry.get(key, telemetry.get("accel" + simvar[-1]))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float('nan')
+        fields[simvar] = value if math.isfinite(value) else float('nan')
+    return fields
+
 
 class Measurements:
     def __init__(self, dll_path, *, clock=time.monotonic, channels=None):

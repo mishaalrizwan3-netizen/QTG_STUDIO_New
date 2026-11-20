@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from backend.automatic_trim import AutomaticTrim, TrimEvents, UP, DOWN, selected, run
+from backend.automatic_trim import AutomaticTrim, TrimEvents, UP, DOWN, SET_TRIM, selected, run
 
 
 def context():
@@ -36,7 +36,7 @@ class AutomaticTrimTests(unittest.TestCase):
         return dict(sequence=sequence, receipt_time=self.now, trim_rad=angle / 2,
                     indicator=indicator, trim_fraction=indicator, elevator_rad=angle)
 
-    def test_context_and_simconnect_use_only_trim_increment_events(self):
+    def test_simconnect_uses_trim_events_and_encodes_signed_targets(self):
         self.assertTrue(selected(context()))
         reader = Mock()
         reader.handle = ctypes.c_void_p(4)
@@ -44,9 +44,14 @@ class AutomaticTrimTests(unittest.TestCase):
         reader.dll.SimConnect_TransmitClientEvent.return_value = 0
         events = TrimEvents(reader)
         events.step(UP); events.step(DOWN)
+        events.set_fraction(-0.001)
+        events.set_fraction(0.001)
         self.assertEqual(reader.dll.SimConnect_MapClientEventToSimEvent.call_args_list[0].args[2], b'ELEV_TRIM_UP')
         self.assertEqual(reader.dll.SimConnect_MapClientEventToSimEvent.call_args_list[1].args[2], b'ELEV_TRIM_DN')
-        self.assertEqual([call.args[2] for call in reader.dll.SimConnect_TransmitClientEvent.call_args_list], [UP, DOWN])
+        self.assertEqual(reader.dll.SimConnect_MapClientEventToSimEvent.call_args_list[2].args[2], b'AXIS_ELEV_TRIM_SET')
+        sent = reader.dll.SimConnect_TransmitClientEvent.call_args_list
+        self.assertEqual([call.args[2] for call in sent], [UP, DOWN, SET_TRIM, SET_TRIM])
+        self.assertEqual([call.args[3] for call in sent[2:]], [16, (-16) & 0xFFFFFFFF])
         self.socket.send.assert_not_called()
         self.brunner.write_setting.assert_not_called()
 
@@ -99,66 +104,41 @@ class AutomaticTrimTests(unittest.TestCase):
             # Step 1: Initial baseline frame at t=0
             self.reader.poll.return_value = self.frame(1, -.1, indicator=1.0)
             self.worker.step()
-            self.assertEqual(self.events.step.call_args_list[-1].args[0], DOWN)
+            self.events.set_fraction.assert_called_once_with(0.999)
             self.assertEqual(self.worker.record_state, 'WAIT_STEP')
             self.assertEqual(self.worker.step_count, 1)
 
             # Wait during Step 1 (e.g. 0.5s elapsed)
             self.now += 0.5
-            self.reader.poll.return_value = self.frame(2, -.1, indicator=0.8)
+            self.reader.poll.return_value = self.frame(2, -.1, indicator=0.999)
             self.worker.step()
             self.assertEqual(self.worker.record_state, 'WAIT_STEP')
             self.assertEqual(self.worker.step_count, 1)
 
-            # 1.0s elapsed on Step 1: verifies actual trim moved to 0.6, sends Step 2
-            self.now += 0.51
-            self.reader.poll.return_value = self.frame(3, -.1, indicator=0.6)
-            self.worker.step()
-            self.assertEqual(self.worker.step_count, 2)
-            self.assertEqual(self.events.step.call_args_list[-1].args[0], DOWN)
-
-            # 1.0s elapsed on Step 2: trim at 0.2, sends Step 3
-            self.now += 1.01
-            self.reader.poll.return_value = self.frame(4, -.1, indicator=0.2)
-            self.worker.step()
-            self.assertEqual(self.worker.step_count, 3)
-
-            # 1.0s elapsed on Step 3: trim at -0.2, sends Step 4
-            self.now += 1.01
-            self.reader.poll.return_value = self.frame(5, -.1, indicator=-0.2)
-            self.worker.step()
-            self.assertEqual(self.worker.step_count, 4)
-
-            # 1.0s elapsed on Step 4: trim at -0.6, sends Step 5
-            self.now += 1.01
-            self.reader.poll.return_value = self.frame(6, -.1, indicator=-0.6)
-            self.worker.step()
-            self.assertEqual(self.worker.step_count, 5)
-
-            # 1.0s elapsed on Step 5: trim reaches full nose-down limit at -1.0, sends Step 6
-            self.now += 1.01
-            self.reader.poll.return_value = self.frame(7, -.1, indicator=-1.0)
-            self.worker.step()
-            self.assertEqual(self.worker.step_count, 6)
-
-            # 1.0s elapsed on Step 6: trim did NOT move past -1.0 (verified limit reached!)
-            self.now += 1.01
-            self.reader.poll.return_value = self.frame(8, -.1, indicator=-1.0)
-            self.worker.step()
+            for step in range(1, 2001):
+                self.now += 0.5 if step == 1 else 1.0
+                measured = 1.0 - step * 0.001
+                self.reader.poll.return_value = self.frame(step + 2, -.1, indicator=measured)
+                self.worker.step()
+                if step < 2000:
+                    self.assertEqual(self.worker.step_count, step + 1)
+                    self.assertAlmostEqual(self.events.set_fraction.call_args.args[0], measured - 0.001)
+            self.assertEqual(self.events.set_fraction.call_count, 2000)
+            self.events.step.assert_not_called()
             self.assertEqual(self.worker.record_state, 'HOLD_FINAL')
             self.assertAlmostEqual(self.worker.verified_nose_down_limit, -1.0)
             self.assertNotEqual(self.worker.result, 'COMPLETE')
 
             # Holding final position: 0.5s into hold
             self.now += 0.5
-            self.reader.poll.return_value = self.frame(9, -.1, indicator=-1.0)
+            self.reader.poll.return_value = self.frame(2003, -.1, indicator=-1.0)
             self.worker.step()
             self.assertEqual(self.worker.record_state, 'HOLD_FINAL')
             self.assertNotEqual(self.worker.result, 'COMPLETE')
 
             # 1.0s final hold complete: automatically finishes and generates reports
             self.now += 0.55
-            self.reader.poll.return_value = self.frame(10, -.1, indicator=-1.0)
+            self.reader.poll.return_value = self.frame(2004, -.1, indicator=-1.0)
             self.worker.step()
             self.assertEqual(self.worker.result, 'COMPLETE')
             self.assertEqual(self.worker.outputs, ['test.csv', 'test.qtg_test.json', 'test.pdf'])
@@ -211,7 +191,7 @@ class AutomaticTrimTests(unittest.TestCase):
         with patch('reports.automatic_control_report.save', return_value=[]):
             self.worker.step()
         self.assertEqual(self.worker.result, 'FAILED')
-        self.assertIn('stopped responding', self.worker.details)
+        self.assertIn('did not reach', self.worker.details)
 
     def test_real_csv_pdf_contains_trim_graphs_and_metrics(self):
         import fitz
@@ -245,7 +225,8 @@ class AutomaticTrimTests(unittest.TestCase):
         host = SimpleNamespace(_common_duration_var=Mock(get=Mock(return_value='75')),
             _test_settings={spec.reference: (fields, [])}, _apply_test_settings=Mock(return_value=True),
             _common_reference_var=Mock(get=Mock(return_value='')), _common_process=None,
-            common_record_button=Mock(), common_status=Mock(), after=Mock(), _poll_common_test=Mock())
+            common_record_button=Mock(), common_status=Mock(), after=Mock(), _poll_common_test=Mock(),
+            _pid_axis_checks={spec.reference: {}})
         with patch.object(engine, 'launch', return_value=(Mock(), {'status_file': 'dummy'})) as launch:
             App._launch_common_test(host, 'auto', spec)
         self.assertEqual(launch.call_args.kwargs['control_method'], 'pitch_trim')
@@ -256,7 +237,9 @@ class AutomaticTrimTests(unittest.TestCase):
         brunner.read_axis.return_value = (0., 0., 0.)
         class Events:
             direction = None
+            target = None
             def step(self, direction): self.direction = direction
+            def set_fraction(self, target): self.target = target
         events = Events()
         sim = Mock()
         sim.is_connected.return_value = True
@@ -270,7 +253,7 @@ class AutomaticTrimTests(unittest.TestCase):
             def poll(self):
                 self.sequence += 1
                 if events.direction == UP: self.angle = min(.4, self.angle + .05)
-                if events.direction == DOWN: self.angle = max(-.4, self.angle - .1)
+                if events.target is not None: self.angle = events.target * .4
                 return dict(sequence=self.sequence, receipt_time=time.monotonic(), elevator_rad=self.angle,
                             trim_rad=self.angle/2, indicator=self.angle/.4, trim_fraction=self.angle/.4)
             def close(self): pass
@@ -289,8 +272,9 @@ class AutomaticTrimTests(unittest.TestCase):
                     (commands/'01.json').write_text('{"action":"record"}')
                 if state['stage'] in ('Completed', 'FAILED'):
                     (commands/'02.json').write_text('{"action":"shutdown"}')
-            result = run(ctx, publish, sim_factory=lambda: sim, brunner_factory=lambda: brunner,
-                         reader_factory=Reader, events_factory=lambda reader: events)
+            with patch('backend.automatic_trim.TRIM_STEP_FRACTION', .5):
+                result = run(ctx, publish, sim_factory=lambda: sim, brunner_factory=lambda: brunner,
+                             reader_factory=Reader, events_factory=lambda reader: events)
             self.assertEqual(result, 0)
             completed_states = [state for state in states if state['stage'] == 'Completed']
             self.assertTrue(completed_states, [(s['stage'], s.get('details')) for s in states[-5:]])
