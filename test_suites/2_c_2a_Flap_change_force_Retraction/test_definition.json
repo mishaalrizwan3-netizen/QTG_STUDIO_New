@@ -1,0 +1,9 @@
+{
+  "reference": "2.c.(2a)-force",
+  "title": "Flap change force (Retraction)",
+  "category": "Longitudinal Handling",
+  "objective": "Record pitch controller force during flap retraction from Index 1 to Index 0.",
+  "tolerance_catalog": "+/- 2.2 daN (5 lbs) or +/- 10% force",
+  "runtime_configuration": "Uses the 2.c.(2a) Flap Change Dynamics automatic sequence",
+  "results_directory": "D:/QTG_Test_Results/2_c_2a_force_Flap_change_force_Retraction"
+}

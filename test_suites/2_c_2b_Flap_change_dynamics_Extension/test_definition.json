@@ -1,0 +1,13 @@
+{
+  "reference": "2.c.(2b)",
+  "title": "Flap change dynamics (Extension)",
+  "category": "Longitudinal Handling",
+  "objective": "Demonstrate simulator response to extending flaps from Index 0 to Index 1.",
+  "demonstration": "Extend flaps from Index 0 to Index 1 and allow free response. Record at least 5 seconds before motion and 15 seconds after motion ends.",
+  "flight_condition": "Approach to landing",
+  "initial_flap_position": "Index 0 (0%)",
+  "final_flap_position": "Index 1 (33%)",
+  "tolerance_catalog": "+/- 1.5 deg or +/- 20% pitch angle | +/- 3 kt airspeed | +/- 30 m (100 ft) altitude",
+  "runtime_configuration": "Existing Flap Change Dynamics Manual and Recorded Replay workflow",
+  "results_directory": "D:/QTG_Test_Results/2_c_2b_Flap_change_dynamics_Extension"
+}

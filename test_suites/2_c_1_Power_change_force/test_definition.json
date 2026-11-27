@@ -1,0 +1,12 @@
+{
+  "reference": "2.c.(1)-force",
+  "title": "Power change force",
+  "category": "Longitudinal Handling",
+  "availability": "SEP catalog test",
+  "objective": "Record pitch controller force during the approach power change. The throttle procedure is the same as Power change dynamics while holding altitude with VVI PID.",
+  "initial_conditions_catalog": "Flt cond: Approach | Alt[ft]: 4000 | IAS[kts]: 90 | Flaps: 1 | Latitude[deg]: 32.235 | Longitude[deg]: 74.135 | Heading[deg]: 48.4 | Pitch[deg]: 3 | Bank[deg]: 0 | Throttle[%]: 50 | Temperature[C]: 15",
+  "tolerance_catalog": "+/- 2.2 daN (5 lbs) or +/- 10% force",
+  "reference_pdf_page": "69",
+  "runtime_configuration": "Uses the Power Change Dynamics throttle sequence with Pitch-only VVI PID altitude hold and records measured BRUNNER pitch force",
+  "results_directory": "D:/QTG_Test_Results/2_c_1_force_Power_change_force"
+}

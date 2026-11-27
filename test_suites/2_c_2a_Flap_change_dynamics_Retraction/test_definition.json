@@ -1,0 +1,13 @@
+{
+  "reference": "2.c.(2a)",
+  "title": "Flap change dynamics (Retraction)",
+  "category": "Longitudinal Handling",
+  "objective": "Demonstrate simulator response to flap retraction in the second-to-third-segment climb condition.",
+  "demonstration": "Retract takeoff flaps to the initial flap-retracted position and allow free response. Record at least 5 seconds before motion and 15 seconds after motion ends.",
+  "flight_condition": "Takeoff through initial flap retraction",
+  "initial_flap_position": "Index 1 (33%)",
+  "final_flap_position": "Index 0 (0%)",
+  "tolerance_catalog": "+/- 1.5 deg or +/- 20% pitch angle | +/- 3 kt airspeed | +/- 30 m (100 ft) altitude",
+  "runtime_configuration": "Existing Flap Change Dynamics Manual and Recorded Replay workflow",
+  "results_directory": "D:/QTG_Test_Results/2_c_2a_Flap_change_dynamics_Retraction"
+}
